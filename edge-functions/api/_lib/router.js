@@ -1,0 +1,342 @@
+// /api/* 路由分发
+import { getConfig, getKV } from './config.js';
+import { fail, noContent, ok, readJSON, withCookies } from './http.js';
+import { cookies, createFlow, createSession, exchangeCode, fetchUserInfo, isAdmin, normalizeUser, readFlow, readSession, decodeIdTokenClaims, buildLogoutUrl } from './oidc.js';
+import { drawQuestions, getBankSize } from './questions.js';
+import { gradeSubmission } from './scoring.js';
+import { buildRanking, getRecord, getStats, listRecords, saveRecord } from './store.js';
+
+const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' };
+
+function segments(request) {
+  const { pathname } = new URL(request.url);
+  // 统一以 /api 为前缀；兼容直接访问 [[default]] 的情况
+  const clean = pathname.replace(/^\/api/, '').replace(/\/+$/, '');
+  return clean.split('/').filter(Boolean);
+}
+
+// Response.redirect 只接受绝对地址，这里统一把站内相对路径补全
+function redirectTo(request, target, config) {
+  if (/^https?:\/\//i.test(target)) return target;
+  const base = config.siteUrl || new URL(request.url).origin;
+  return `${base.replace(/\/+$/, '')}${target.startsWith('/') ? '' : '/'}${target}`;
+}
+
+export async function handleApi(context) {
+  const { request } = context;
+  const config = getConfig(context.env);
+  const method = request.method.toUpperCase();
+
+  if (method === 'OPTIONS') return noContent(204, { allow: 'GET,POST,PUT,DELETE,OPTIONS' });
+
+  let kv;
+  try {
+    kv = getKV(context.env, config);
+  } catch (e) {
+    return fail(e.message, 500);
+  }
+
+  const parts = segments(request);
+  const path = parts.join('/');
+
+  try {
+    // ---- 认证 ----
+    if (path === 'auth/login') return await handleLogin(request, config);
+    if (path === 'auth/callback') return await handleCallback(request, config);
+    if (path === 'auth/logout') return await handleLogout(request, config);
+    if (path === 'auth/me') return await handleMe(request, config);
+
+    // ---- 考试规则 ----
+    if (path === 'exam/rules') return ok({ rules: publicRules(config) });
+
+    const session = await readSession(request, config.sessionSecret);
+    const admin = { session, isAdmin: isAdmin(session, config) };
+
+    // ---- 考试 ----
+    if (path === 'exam/start' && method === 'POST') return await handleExamStart(request, config, kv, session);
+    if (path === 'exam/questions' && method === 'GET') return await handleExamQuestions(config, kv, session, new URL(request.url).searchParams);
+    if (path === 'exam/submit' && method === 'POST') return await handleExamSubmit(request, config, kv, session);
+
+    // ---- 排名 ----
+    if (path === 'ranking' && method === 'GET') return ok({ ranking: await buildRanking(kv) });
+
+    // ---- 管理后台 ----
+    if (path === 'admin/stats' && method === 'GET') return await handleAdminStats(kv, admin);
+    if (path === 'admin/records' && method === 'GET') return await handleAdminRecords(kv, admin);
+    if (path === 'admin/record' && method === 'GET') return await handleAdminRecord(kv, admin, new URL(request.url).searchParams);
+
+    // ---- 站点元信息 ----
+    if (path === 'meta' && method === 'GET') return ok(metaInfo(config, session, admin));
+
+    return fail('接口不存在', 404);
+  } catch (e) {
+    return fail(`服务异常: ${e.message}`, 500);
+  }
+}
+
+function publicRules(config) {
+  return {
+    questionCount: config.questionCount,
+    pointsPerQuestion: config.pointsPerQuestion,
+    totalScore: config.totalScore,
+    passScore: config.passScore,
+    durationMinutes: config.durationMinutes,
+    durationSeconds: config.durationMinutes * 60,
+  };
+}
+
+function metaInfo(config, session, admin) {
+  return {
+    siteUrl: config.siteUrl,
+    bankSize: getBankSize(),
+    rules: publicRules(config),
+    user: session ? { name: session.name, username: session.username } : null,
+    isAdmin: admin.isAdmin,
+  };
+}
+
+/* ---------------- 认证 ---------------- */
+
+async function handleLogin(request, config) {
+  const url = new URL(request.url);
+  const returnTo = url.searchParams.get('returnTo') || '/';
+  const flow = await createFlow(request, config, returnTo);
+  return withCookies(Response.redirect(flow.authorizeUrl, 302), cookies.setFlow(request, flow.token));
+}
+
+async function handleCallback(request, config) {
+  const url = new URL(request.url);
+  const error = url.searchParams.get('error');
+  if (error) {
+    const msg = encodeURIComponent(url.searchParams.get('error_description') || error);
+    return withCookies(Response.redirect(redirectTo(request, `/?auth_error=${msg}`, config), 302), cookies.clearFlow(request));
+  }
+  const code = url.searchParams.get('code');
+  const state = url.searchParams.get('state');
+  const flow = await readFlow(request, config);
+  if (!code || !flow || !state || state !== flow.state) {
+    return withCookies(
+      Response.redirect(redirectTo(request, `/?auth_error=${encodeURIComponent('登录状态校验失败，请重试')}`, config), 302),
+      cookies.clearFlow(request),
+    );
+  }
+
+  const token = await exchangeCode(request, config, code, flow.codeVerifier);
+  const idClaims = token.id_token ? decodeIdTokenClaims(token.id_token) : {};
+  let userInfo = idClaims;
+  if (token.access_token) {
+    try {
+      userInfo = await fetchUserInfo(config, token.access_token);
+    } catch {
+      // userinfo 失败时退回 id_token claims
+    }
+  }
+  const user = normalizeUser(userInfo, idClaims);
+  const sessionToken = await createSession(config.sessionSecret, user);
+  const target = flow.returnTo && flow.returnTo.startsWith('/') ? flow.returnTo : '/';
+  return withCookies(
+    Response.redirect(redirectTo(request, target, config), 302),
+    [cookies.setSession(request, sessionToken), cookies.clearFlow(request)],
+  );
+}
+
+async function handleLogout(request, config) {
+  const session = await readSession(request, config.sessionSecret);
+  const url = new URL(request.url);
+  const postLogout = `${config.siteUrl || url.origin}/`;
+  const logoutUrl = await buildLogoutUrl(config, null, postLogout);
+  return withCookies(
+    Response.redirect(redirectTo(request, logoutUrl || '/', config), 302),
+    cookies.clearSession(request),
+  );
+}
+
+async function handleMe(request, config) {
+  const session = await readSession(request, config.sessionSecret);
+  const admin = isAdmin(session, config);
+  return ok({
+    authenticated: !!session,
+    user: session ? { name: session.name, username: session.username, sub: session.sub } : null,
+    isAdmin: admin,
+    rules: publicRules(config),
+  });
+}
+
+/* ---------------- 考试 ---------------- */
+
+function paperKey(sub) {
+  return `exam:paper:${sub}`;
+}
+
+async function handleExamStart(request, config, kv, session) {
+  if (!session) return fail('请先登录', 401);
+
+  const body = await readJSON(request);
+  const questions = drawQuestions(config.questionCount);
+  const startedAt = Date.now();
+  const paper = {
+    sub: session.sub,
+    name: session.name,
+    questions,
+    startedAt,
+    expiresAt: startedAt + config.durationMinutes * 60 * 1000,
+    rules: publicRules(config),
+  };
+  await kv.put(paperKey(session.sub), JSON.stringify(paper), { expirationTtl: config.durationMinutes * 60 + 3600 });
+  return ok({
+    paperId: paperKey(session.sub),
+    startedAt: paper.startedAt,
+    expiresAt: paper.expiresAt,
+    durationSeconds: config.durationMinutes * 60,
+    rules: paper.rules,
+    questions: questions.map((q) => ({ ...q, originalId: q.id })),
+    total: questions.length,
+  });
+}
+
+async function handleExamQuestions(config, kv, session, params) {
+  if (!session) return fail('请先登录', 401);
+  const raw = await kv.get(paperKey(session.sub), { type: 'json' });
+  if (!raw) return fail('未找到进行中的考试，请重新开始', 409);
+
+  // 只返回当前题目对应的题号，客户端可用 ?index=N 逐题拉取；不传则返回整卷
+  const index = params.get('index');
+  if (index !== null) {
+    const i = Number(index);
+    if (!Number.isInteger(i) || i < 0 || i >= raw.questions.length) return fail('题目序号越界', 400);
+    return ok({
+      question: { ...raw.questions[i], originalId: raw.questions[i].id },
+      index: i,
+      total: raw.questions.length,
+      startedAt: raw.startedAt,
+      expiresAt: raw.expiresAt,
+    });
+  }
+  return ok({
+    questions: raw.questions.map((q) => ({ ...q, originalId: q.id })),
+    total: raw.questions.length,
+    startedAt: raw.startedAt,
+    expiresAt: raw.expiresAt,
+    durationSeconds: config.durationMinutes * 60,
+  });
+}
+
+async function handleExamSubmit(request, config, kv, session) {
+  if (!session) return fail('请先登录', 401);
+  const body = await readJSON(request);
+  const answers = body.answers && typeof body.answers === 'object' ? body.answers : {};
+
+  const raw = await kv.get(paperKey(session.sub), { type: 'json' });
+  let questions = raw && Array.isArray(raw.questions) ? raw.questions : null;
+
+  // 用时以服务端记录的开始时间为准；试卷缺失时用客户端回传值兜底，
+  // 但不允许晚于当前时间，避免伪造开始时间把用时报短。
+  const now = Date.now();
+  let startedAt = raw && raw.startedAt ? raw.startedAt : Number(body.startedAt) || now;
+  if (!(startedAt > 0) || startedAt > now) startedAt = now;
+
+  if (!questions) {
+    // 试卷丢失（KV 过期/跨节点延迟）时，用客户端回传的题号还原，判分仍以服务端题库为准
+    const ids = Array.isArray(body.questionIds) ? body.questionIds : [];
+    questions = ids.map((id) => ({ id }));
+    if (!questions.length) return fail('未找到进行中的考试，请重新开始', 409);
+  }
+
+  const finishedAt = now;
+  const graded = gradeSubmission(questions, answers, config.pointsPerQuestion);
+  const durationMs = Math.max(0, finishedAt - startedAt);
+  const passed = graded.score >= config.passScore;
+
+  const record = await saveRecord(kv, {
+    sub: session.sub,
+    name: session.name,
+    username: session.username,
+    startedAt,
+    finishedAt,
+    durationMs,
+    score: graded.score,
+    correctCount: graded.correctCount,
+    total: questions.length,
+    passScore: config.passScore,
+    passed,
+    details: graded.details,
+  });
+
+  await kv.delete(paperKey(session.sub));
+
+  return ok({
+    recordId: record.id,
+    score: graded.score,
+    correctCount: graded.correctCount,
+    total: questions.length,
+    passScore: config.passScore,
+    passed,
+    startedAt,
+    finishedAt,
+    durationMs,
+    details: graded.details.map((d) => ({
+      id: d.id,
+      correctAnswer: d.correctAnswer,
+      submittedAnswer: d.submittedAnswer,
+      isCorrect: d.isCorrect,
+    })),
+  });
+}
+
+/* ---------------- 管理后台 ---------------- */
+
+function requireAdmin(admin) {
+  if (!admin.session) return fail('请先登录', 401);
+  if (!admin.isAdmin) return fail('无权访问管理后台', 403);
+  return null;
+}
+
+async function handleAdminStats(kv, admin) {
+  const denied = requireAdmin(admin);
+  if (denied) return denied;
+  const stats = await getStats(kv);
+  const records = await listRecords(kv);
+  const finished = records.filter((r) => r.finishedAt);
+  const fastest = finished.reduce((a, r) => (!a || (r.durationMs ?? Infinity) < (a.durationMs ?? Infinity) ? r : a), null);
+  const slowest = finished.reduce((a, r) => (!a || (r.durationMs ?? -1) > (a.durationMs ?? -1) ? r : a), null);
+  return ok({
+    stats: stats || { uniqueUsers: 0, attempts: 0, passed: 0, passRate: 0, avgScore: 0, maxScore: null, minScore: null, fastestMs: null, slowestMs: null },
+    extra: {
+      fastest: fastest ? { name: fastest.name, durationMs: fastest.durationMs, score: fastest.score, finishedAt: fastest.finishedAt } : null,
+      slowest: slowest ? { name: slowest.name, durationMs: slowest.durationMs, score: slowest.score, finishedAt: slowest.finishedAt } : null,
+      totalQuestions: finished.length ? finished[0].total : null,
+    },
+    isAdmin: true,
+  });
+}
+
+async function handleAdminRecords(kv, admin) {
+  const denied = requireAdmin(admin);
+  if (denied) return denied;
+  const records = await listRecords(kv);
+  return ok({
+    records: records.map((r) => ({
+      id: r.id,
+      name: r.name,
+      username: r.username,
+      score: r.score,
+      correctCount: r.correctCount,
+      total: r.total,
+      passed: r.passed,
+      startedAt: r.startedAt,
+      finishedAt: r.finishedAt,
+      durationMs: r.durationMs,
+    })),
+    isAdmin: true,
+  });
+}
+
+async function handleAdminRecord(kv, admin, params) {
+  const denied = requireAdmin(admin);
+  if (denied) return denied;
+  const id = params.get('id');
+  if (!id) return fail('缺少记录 id', 400);
+  const record = await getRecord(kv, id);
+  if (!record) return fail('记录不存在', 404);
+  return ok({ record, isAdmin: true });
+}
