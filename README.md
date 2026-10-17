@@ -159,6 +159,10 @@ EdgeOne KV 的 key 只允许**数字、字母、下划线**（≤ 512B），所�
 
 > EdgeOne KV 为最终一致性（跨节点最长 60s 可见），排名与统计的秒级延迟属预期行为。
 
+> `kv.list()` 的 `cursor` 是**严格字符串**：首次查询不能带这个字段，带 `undefined` 会直接抛
+> `cursor type invalid. expect: 'string' get: 'undefined'`。分页统一走 `store.js` 的 `listAllKeys()`，
+> 它只在拿到非空 cursor 时才续翻。空数据池同样会走一次前缀扫描，所以这个坑和「有没有人答题」无关。
+
 ## 本地开发与测试
 
 ```bash

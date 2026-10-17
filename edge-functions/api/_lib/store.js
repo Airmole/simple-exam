@@ -33,13 +33,19 @@ export function paperKey(sub) {
 
 async function listAllKeys(kv, prefix) {
   const keys = [];
-  let cursor;
+  let cursor = null;
+  let guard = 0;
   do {
-    const res = await kv.list({ prefix, limit: 256, cursor });
+    // 首查不能带 cursor：EdgeOne 对 cursor 做严格类型校验，传 undefined 直接抛
+    // `cursor type invalid. expect: 'string' get: 'undefined'`。
+    const opts = { prefix, limit: 256 };
+    if (cursor) opts.cursor = cursor;
+    const res = (await kv.list(opts)) || {};
     (res.keys || []).forEach((k) => keys.push(k.key ?? k.name ?? k));
-    // EdgeOne 的 cursor 是「下一页的第一个 key」，直接透传即可
-    cursor = res && !res.complete ? res.cursor : null;
-  } while (cursor);
+
+    // complete 缺省时按 cursor 判断；cursor 为空（'' 或 null）说明已遍历完
+    cursor = (res.complete === true ? null : res.cursor) || null;
+  } while (cursor && ++guard < 200);
   return keys;
 }
 

@@ -261,5 +261,40 @@ console.log('\n[11] 登出与未知接口');
   check('未知接口 404', nf.status === 404, nf.text);
 }
 
+console.log('\n[12] 空数据池上的首查分页（线上 cursor 严格校验）');
+{
+  // 独立一份干净 KV：没有任何 exam_record_ / exam_user_，模拟「还没人答题」
+  const emptyKv = createMockKV();
+  const saved = globalThis.EXAM_KV;
+  globalThis.EXAM_KV = emptyKv;
+
+  const r = await call('GET', '/api/ranking');
+  check('空数据 ranking 200', r.status === 200, r.text);
+  check('空数据 ranking 为空数组', Array.isArray(r.json && r.json.ranking) && r.json.ranking.length === 0, r.text);
+  check('空数据报错不含 cursor', !String(r.text).includes('cursor'), r.text);
+
+  // 首查不能把 cursor 传下去（边查边记录实际传参）
+  const { buildRanking } = await import('../edge-functions/api/_lib/store.js');
+  const got = [];
+  const spyKv = {
+    get: (...a) => emptyKv.get(...a),
+    put: (...a) => emptyKv.put(...a),
+    delete: (...a) => emptyKv.delete(...a),
+    list: async (opts) => { got.push(opts.cursor); return emptyKv.list(opts); },
+  };
+  await buildRanking(spyKv);
+  check('首查不带 cursor（传 undefined 会触发线上类型错误）', got.length === 1 && got[0] === undefined, JSON.stringify(got));
+
+  // 有分页时靠 cursor 续翻，能翻完
+  for (let i = 0; i < 300; i++) {
+    await emptyKv.put(`exam_record_bulk${String(i).padStart(3, '0')}`,
+      JSON.stringify({ id: `bulk${i}`, sub: `b${i}`, name: `批量${i}`, score: 60, durationMs: 1000, startedAt: 1, finishedAt: 2 }));
+  }
+  const many = await call('GET', '/api/ranking');
+  check('300 条记录全部翻到（分页正确）', many.status === 200 && many.json.ranking.length === 300, many.text.slice(0, 120));
+
+  globalThis.EXAM_KV = saved;
+}
+
 console.log(`\n结果: ${pass} 通过, ${failCount} 失败`);
 process.exit(failCount ? 1 : 0);

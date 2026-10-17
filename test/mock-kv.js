@@ -1,6 +1,7 @@
 // 内存版 KV，尽量贴着 EdgeOne KV 的真实行为，避免本地跑通、线上挂掉：
 // - key 只允许数字、字母、下划线，长度 ≤ 512B（超限直接抛错）
-// - list 的 cursor 是「下一页的第一个 key」，按字典序分页，limit 上限 256
+// - list 的 cursor 是「下一页的第一个 key」，按字典序分页，limit 上限 256；
+//   传了 cursor 但不是 string 一律抛错（线上就是这么挑出 undefined 的）
 const KEY_PATTERN = /^[0-9A-Za-z_]+$/;
 const MAX_KEY_BYTES = 512;
 const MAX_LIMIT = 256;
@@ -27,6 +28,9 @@ export function createMockKV() {
     async put(key, value) { map.set(assertKey(key), value); },
     async delete(key) { map.delete(assertKey(key)); },
     async list({ prefix = '', limit = MAX_LIMIT, cursor } = {}) {
+      if (cursor !== undefined && typeof cursor !== 'string') {
+        throw new Error(`cursor type invalid. expect: 'string' get: '${typeof cursor}'`);
+      }
       const size = Math.min(limit || MAX_LIMIT, MAX_LIMIT);
       const snapshot = [...map.keys()].filter((k) => k.startsWith(prefix)).sort();
       const start = cursor ? snapshot.findIndex((k) => k >= cursor) : 0;
