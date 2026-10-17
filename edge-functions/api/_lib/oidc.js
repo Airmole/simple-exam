@@ -127,39 +127,82 @@ export async function readFlow(request, config) {
   return flow;
 }
 
-// RFC 6749 §2.3.1：client_id/client_secret 先 form-urlencoded 再拼成 Basic 凭据。
-// Basic 的「字符集」必须是 ASCII，btoa 遇到非 ASCII 会直接抛错，所以按 UTF-8 字节转 base64。
+// 客户端认证方式（RFC 6749 §2.3.1）。OneID 对两种方式的支持因应用而异：
+// - basic：Authorization: Basic base64(urlencode(id):urlencode(secret))，凭据本身必须是 ASCII
+// - post：client_id/client_secret 直接放进表单 body，躲开 Basic 的 ASCII 与反代改 header 两类风险
+// 配置里显式指定优先，否则先 basic；遇到 invalid_client 说明凭据没被认下来，换另一种再试一次。
+const CLIENT_AUTH_METHODS = ['basic', 'post'];
+
+export function clientAuthMethods(config) {
+  const preferred = String(config.oidcClientAuthMethod || '').trim().toLowerCase();
+  const methods = CLIENT_AUTH_METHODS.filter((m) => m !== preferred);
+  return preferred ? [preferred, ...methods] : methods;
+}
+
+/**
+ * RFC 6749 §2.3.1：client_id/client_secret 先 form-urlencoded 再拼成 Basic 凭据。
+ * Basic 只保证 ASCII 可还原，btoa 遇到非 ASCII 会直接抛错，所以按 UTF-8 字节转 base64。
+ * 编码放不进 header（视作失败）时返回 null，交给调用方换用 body 认证。
+ */
 function basicAuthHeader(clientId, clientSecret) {
   const pair = `${encodeURIComponent(clientId)}:${encodeURIComponent(clientSecret)}`;
-  const bytes = new TextEncoder().encode(pair);
-  let binary = '';
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return `Basic ${btoa(binary)}`;
+  if (!/^[\x20-\x7e]*$/.test(pair)) return null;
+  return `Basic ${btoa(pair)}`;
+}
+
+function isInvalidClient(res, text) {
+  if (res.status !== 401 && res.status !== 400) return false;
+  return /invalid_client/.test(text);
+}
+
+async function requestToken(meta, form, method, config) {
+  const headers = {
+    'content-type': 'application/x-www-form-urlencoded',
+    accept: 'application/json',
+  };
+  let params = new URLSearchParams(form);
+  if (method === 'basic') {
+    const auth = basicAuthHeader(config.oidcClientId, config.oidcClientSecret);
+    if (!auth) return null; // 凭据里带非 ASCII，Basic 编不出来
+    headers.authorization = auth;
+  } else {
+    params.set('client_id', config.oidcClientId);
+    params.set('client_secret', config.oidcClientSecret);
+  }
+  // body 必须是字符串：URLSearchParams 在 Edge 运行时不算合法 BodyInit，
+  // fetch 构造 Request 时就会抛「only String/... is allowed as the body initializer」。
+  const res = await fetch(meta.token_endpoint, { method: 'POST', headers, body: params.toString() });
+  const text = await res.text();
+  return { res, text };
 }
 
 export async function exchangeCode(request, config, code, codeVerifier) {
   const meta = await discover(config.oidcIssuer);
-  // 必须是字符串 body。URLSearchParams 在部分 Edge 运行时里不会被识别为合法 BodyInit，
-  // 会被 fetch 拒成「only String/ArrayBuffer/... is allowed as the body initializer」。
-  const body = new URLSearchParams({
+  const form = {
     grant_type: 'authorization_code',
     code,
     redirect_uri: redirectUri(request, config),
     code_verifier: codeVerifier,
-    client_id: config.oidcClientId,
-  }).toString();
-  const res = await fetch(meta.token_endpoint, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/x-www-form-urlencoded',
-      accept: 'application/json',
-      authorization: basicAuthHeader(config.oidcClientId, config.oidcClientSecret),
-    },
-    body,
-  });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`换取 token 失败: ${res.status} ${text.slice(0, 300)}`);
-  return JSON.parse(text);
+  };
+
+  const attempts = [];
+  let last = null;
+  for (const method of clientAuthMethods(config)) {
+    const sent = await requestToken(meta, form, method, config);
+    if (!sent) {
+      attempts.push(`${method}: 客户端凭据含非 ASCII 字符，无法放进 Basic 头`);
+      continue;
+    }
+    const { res, text } = sent;
+    if (res.ok) return JSON.parse(text);
+    last = { res, text };
+    if (!isInvalidClient(res, text)) break; // 不是凭据问题，换方式也没用
+    attempts.push(`${method}: ${res.status}`);
+  }
+
+  const detail = last ? `${last.res.status} ${last.text.slice(0, 300)}` : '';
+  const tried = attempts.length ? `（已尝试 ${attempts.join('，')}）` : '';
+  throw new Error(`换取 token 失败: ${detail || '客户端认证方式均不可用'}${tried}`);
 }
 
 export async function fetchUserInfo(config, accessToken) {

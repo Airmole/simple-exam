@@ -86,19 +86,44 @@ async function handleMockOidc(req, res) {
     return res.end();
   }
   if (url.pathname === '/mock-oidc/token') {
-    // 真 OneID 走 client_secret_basic，这里照着校验，免得凭据编码错了本地还跑得通
-    const auth = req.headers.authorization || '';
-    const decoded = auth.startsWith('Basic ')
-      ? Buffer.from(auth.slice(6), 'base64').toString('utf8').split(':').map(decodeURIComponent).join(':')
-      : '';
-    if (decoded !== `${ENV.OIDC_CLIENT_ID}:${ENV.OIDC_CLIENT_SECRET}`) {
-      return json(res, { error: 'invalid_client', error_description: 'missing client_secret' }, 401);
-    }
+    // 真 OneID 走 client_secret_basic，也接受 client_secret_post；哪种都要把凭据校验到位，
+    // 否则凭据编码错了本地还是绿的（上一轮的 bug 就是这么漏掉的）。
     let body = '';
     for await (const chunk of req) body += chunk;
     const params = new URLSearchParams(body);
+
+    const auth = req.headers.authorization || '';
+    let creds = null;
+    let method = 'none';
+    if (auth.startsWith('Basic ')) {
+      method = 'basic';
+      // Basic 里是 urlencode 过的 id:secret（RFC 6749 §2.3.1），要解回来再比
+      const pair = Buffer.from(auth.slice(6), 'base64').toString('utf8');
+      const i = pair.indexOf(':');
+      if (i > 0) {
+        try {
+          creds = [decodeURIComponent(pair.slice(0, i)), decodeURIComponent(pair.slice(i + 1))];
+        } catch {
+          creds = null;
+        }
+      }
+    } else if (params.has('client_secret')) {
+      method = 'post';
+      creds = [params.get('client_id'), params.get('client_secret')];
+    }
+
+    if (!creds || creds[0] !== ENV.OIDC_CLIENT_ID || creds[1] !== ENV.OIDC_CLIENT_SECRET) {
+      return json(res, {
+        error: 'invalid_client',
+        error_description: `Client authentication failed (method=${method})`,
+      }, 401);
+    }
+
     const info = issuedCodes.get(params.get('code'));
     if (!info) return json(res, { error: 'invalid_grant' }, 400);
+    if (info.redirect_uri !== params.get('redirect_uri')) {
+      return json(res, { error: 'invalid_grant', error_description: 'redirect_uri mismatch' }, 400);
+    }
     issuedCodes.delete(params.get('code'));
     const access = `at_${Math.random().toString(36).slice(2)}`;
     issuedTokens.set(access, info);

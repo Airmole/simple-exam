@@ -92,6 +92,19 @@ ADMIN_USERS=admin@corp.com,zhangsan
 EXAM_DURATION_MINUTES=60
 ```
 
+### 4.1 若回调停留在 `invalid_client`
+
+`/api/auth/callback` 返回 `换取 token 失败: 400 invalid_client` 说明 OneID 没认下客户端凭据。
+token 请求默认先发 `client_secret_basic`（RFC 6749 §2.3.1：先 urlencode 再 base64），
+拿到 `invalid_client` 会自动改用 `client_secret_post` 重试一次；两种都失败才会报错，
+错误信息里会注明试过哪几种方式。
+
+排错顺序：
+
+1. `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` 是否与 OneID 应用配置完全一致（多余空格也算不一致）。
+2. 密钥里若有非 ASCII 字符（中文等），`Basic` 头承载不了，把 `OIDC_CLIENT_AUTH_METHOD` 设为 `post`。
+3. 改完配置后对最新提交**重新部署**，边缘函数不会自动读取新的环境变量。
+
 ### 5. 在 OneID 侧登记回调地址
 
 在腾讯统一身份认证的应用配置里，把回调地址设为：
@@ -114,6 +127,7 @@ https://dji-exam.airmole.cn/api/auth/callback
 | `OIDC_ISSUER` | — | OneID issuer |
 | `OIDC_CLIENT_ID` | — | 客户端 ID |
 | `OIDC_CLIENT_SECRET` | — | 客户端密钥 |
+| `OIDC_CLIENT_AUTH_METHOD` | 空（先 `basic` 再 `post`） | 客户端认证方式。`basic` 走 `Authorization` 头，`post` 把凭据放表单；凭据非 ASCII 或反代改写 header 时用 `post` |
 | `OIDC_SCOPES` | `openid profile` | 申请 scope |
 | `SESSION_SECRET` | 回退用 client secret | 会话签名/加密密钥，建议单独配置 |
 | `EXAM_QUESTION_COUNT` | `50` | 抽题数量 |
