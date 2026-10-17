@@ -1,4 +1,4 @@
-import { buildAuthorizeUrl, createFlow, createSession, readSession, isAdmin, normalizeUser, redirectUri } from '../edge-functions/api/_lib/oidc.js';
+import { buildAuthorizeUrl, createFlow, createSession, readSession, isAdmin, normalizeUser, redirectUri, exchangeCode } from '../edge-functions/api/_lib/oidc.js';
 import { hmacSign, hmacVerify, encryptJSON, decryptJSON, sha256b64url, b64urlEncode } from '../edge-functions/api/_lib/crypto.js';
 
 let pass = 0, fail = 0;
@@ -76,6 +76,51 @@ console.log('\n[5] 用户信息归一化');
   check('合并 id_token 与 userinfo', u.name === '张三' && u.username === 'zhangsan' && u.email === 'z@c.com', JSON.stringify(u));
   const u2 = normalizeUser({ sub: 's9' }, {});
   check('无 name 时回退 sub', u2.name === 's9');
+}
+
+console.log('\n[6] token 请求的报文（曾经在这里 500）');
+{
+  // 拦一道 fetch，把真正要发出去的 init 拿下来检查，再返回假响应
+  const realFetch = globalThis.fetch;
+  let captured = null;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/token')) {
+      captured = { url: String(url), init };
+      return new Response(JSON.stringify({ access_token: 'at', id_token: 'x.y.z' }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({
+      issuer: config.oidcIssuer,
+      authorization_endpoint: `${config.oidcIssuer}/authorize`,
+      token_endpoint: `${config.oidcIssuer}/token`,
+      userinfo_endpoint: `${config.oidcIssuer}/userinfo`,
+    }), { headers: { 'content-type': 'application/json' } });
+  };
+
+  try {
+    const req = new Request('https://dji-exam.airmole.cn/api/auth/callback');
+    const token = await exchangeCode(req, config, 'code-1', 'verifier-1');
+    check('换 token 成功', token.access_token === 'at', JSON.stringify(token));
+
+    const body = captured && captured.init.body;
+    // 真正的坑：URLSearchParams 在 Edge 运行时不被认成合法 BodyInit，fetch 直接抛
+    check('body 是字符串（不是 URLSearchParams）', typeof body === 'string', `实际类型: ${Object.prototype.toString.call(body)}`);
+    const params = new URLSearchParams(String(body));
+    check('grant_type 正确', params.get('grant_type') === 'authorization_code');
+    check('带上 code_verifier（PKCE）', params.get('code_verifier') === 'verifier-1');
+    check('redirect_uri 与授权时一致', params.get('redirect_uri') === redirectUri(req, config));
+
+    // Basic 凭据必须是「urlencoded 之后」再 base64，解开后能还原出原始 client_secret
+    const auth = String((captured.init.headers || {}).authorization || (captured.init.headers || {}).get?.('authorization') || '');
+    check('走 client_secret_basic', auth.startsWith('Basic '), auth);
+    const decodedPair = Buffer.from(auth.slice(6), 'base64').toString('utf8');
+    const [decodedId, ...rest] = decodedPair.split(':');
+    check('client_id 可还原', decodeURIComponent(decodedId) === config.oidcClientId, decodedPair);
+    check('client_secret 可还原', decodeURIComponent(rest.join(':')) === config.oidcClientSecret, decodedPair);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 }
 
 console.log(`\n结果: ${pass} 通过, ${fail} 失败`);

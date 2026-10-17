@@ -127,25 +127,33 @@ export async function readFlow(request, config) {
   return flow;
 }
 
-async function basicAuthHeader(clientId, clientSecret) {
-  return `Basic ${btoa(`${encodeURIComponent(clientId)}:${encodeURIComponent(clientSecret)}`)}`;
+// RFC 6749 §2.3.1：client_id/client_secret 先 form-urlencoded 再拼成 Basic 凭据。
+// Basic 的「字符集」必须是 ASCII，btoa 遇到非 ASCII 会直接抛错，所以按 UTF-8 字节转 base64。
+function basicAuthHeader(clientId, clientSecret) {
+  const pair = `${encodeURIComponent(clientId)}:${encodeURIComponent(clientSecret)}`;
+  const bytes = new TextEncoder().encode(pair);
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return `Basic ${btoa(binary)}`;
 }
 
 export async function exchangeCode(request, config, code, codeVerifier) {
   const meta = await discover(config.oidcIssuer);
+  // 必须是字符串 body。URLSearchParams 在部分 Edge 运行时里不会被识别为合法 BodyInit，
+  // 会被 fetch 拒成「only String/ArrayBuffer/... is allowed as the body initializer」。
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
     code,
     redirect_uri: redirectUri(request, config),
     code_verifier: codeVerifier,
     client_id: config.oidcClientId,
-  });
+  }).toString();
   const res = await fetch(meta.token_endpoint, {
     method: 'POST',
     headers: {
       'content-type': 'application/x-www-form-urlencoded',
       accept: 'application/json',
-      authorization: await basicAuthHeader(config.oidcClientId, config.oidcClientSecret),
+      authorization: basicAuthHeader(config.oidcClientId, config.oidcClientSecret),
     },
     body,
   });
