@@ -4,7 +4,7 @@ import { fail, noContent, ok, readJSON, withCookies } from './http.js';
 import { cookies, createFlow, createSession, exchangeCode, fetchUserInfo, isAdmin, normalizeUser, readFlow, readSession, decodeIdTokenClaims, buildLogoutUrl } from './oidc.js';
 import { drawQuestions, getBankSize } from './questions.js';
 import { gradeSubmission } from './scoring.js';
-import { buildRanking, getRecord, getStats, listRecords, saveRecord } from './store.js';
+import { buildRanking, getRecord, getStats, listRecords, paperKey, saveRecord } from './store.js';
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' };
 
@@ -33,7 +33,8 @@ export async function handleApi(context) {
   try {
     kv = getKV(context.env, config);
   } catch (e) {
-    return fail(e.message, 500);
+    // 绑定缺失属于部署配置问题，单独给出 503 + 配置提示，别混进「服务异常」
+    return fail(e.message, 503, { code: 'KV_BINDING_MISSING', binding: config.kvBinding });
   }
 
   const parts = segments(request);
@@ -164,10 +165,6 @@ async function handleMe(request, config) {
 
 /* ---------------- 考试 ---------------- */
 
-function paperKey(sub) {
-  return `exam:paper:${sub}`;
-}
-
 async function handleExamStart(request, config, kv, session) {
   if (!session) return fail('请先登录', 401);
 
@@ -262,6 +259,7 @@ async function handleExamSubmit(request, config, kv, session) {
     details: graded.details,
   });
 
+  // 交卷后清掉进行中的试卷，防止重复提交
   await kv.delete(paperKey(session.sub));
 
   return ok({

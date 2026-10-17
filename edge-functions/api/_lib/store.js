@@ -1,14 +1,35 @@
 // KV 数据模型
 //
-// exam:record:<recordId>  单次答题记录（含逐题明细）
-// exam:user:<sub>         用户索引（记录其所有 recordId、最高分、最快用时）
-// exam:stats              汇总统计（考试人数、次数、合格率等）
+// EdgeOne KV 的 key 只允许「数字、字母、下划线」，长度 ≤ 512B，所以这里统一用 `_` 分隔，
+// 用户 sub 里可能出现的其他字符（`:`、`.`、`-` 等）先做一次编码再拼进 key。
 //
-// 排名不额外落库：由 exam:record: 前缀扫描后在内存中聚合（用户取最高分，同分用时短优先）
+// exam_record_<recordId>  单次答题记录（含逐题明细）
+// exam_user_<sub>         用户索引（记录其所有 recordId、最高分、最快用时）
+// exam_paper_<sub>        进行中的试卷（含 TTL）
+// exam_stats              汇总统计（考试人数、次数、合格率等）
+//
+// 排名不额外落库：由 exam_record_ 前缀扫描后在内存中聚合（用户取最高分，同分用时短优先）
 
-const RECORD_PREFIX = 'exam:record:';
-const USER_PREFIX = 'exam:user:';
-const STATS_KEY = 'exam:stats';
+const RECORD_PREFIX = 'exam_record_';
+const USER_PREFIX = 'exam_user_';
+const PAPER_PREFIX = 'exam_paper_';
+const STATS_KEY = 'exam_stats';
+
+/** 把任意字符串压成只含字母数字下划线的安全片段 */
+export function keySegment(raw) {
+  return String(raw || '')
+    .replace(/[^0-9A-Za-z_]/g, '_');
+}
+
+export const prefixOf = {
+  record: RECORD_PREFIX,
+  user: USER_PREFIX,
+  paper: PAPER_PREFIX,
+};
+
+export function paperKey(sub) {
+  return `${PAPER_PREFIX}${keySegment(sub)}`;
+}
 
 async function listAllKeys(kv, prefix) {
   const keys = [];
@@ -16,7 +37,8 @@ async function listAllKeys(kv, prefix) {
   do {
     const res = await kv.list({ prefix, limit: 256, cursor });
     (res.keys || []).forEach((k) => keys.push(k.key ?? k.name ?? k));
-    cursor = res.complete ? null : res.cursor;
+    // EdgeOne 的 cursor 是「下一页的第一个 key」，直接透传即可
+    cursor = res && !res.complete ? res.cursor : null;
   } while (cursor);
   return keys;
 }
@@ -33,7 +55,7 @@ export async function putJSON(kv, key, value) {
 export const RECORD_ID_PREFIX = RECORD_PREFIX;
 
 export async function saveRecord(kv, record) {
-  record.id = record.id || `${record.sub}_${record.startedAt}_${Math.random().toString(36).slice(2, 8)}`;
+  record.id = record.id || `${keySegment(record.sub)}_${record.startedAt}_${Math.random().toString(36).slice(2, 8)}`;
   record.key = `${RECORD_PREFIX}${record.id}`;
   await putJSON(kv, record.key, record);
   await updateUserIndex(kv, record);
@@ -42,7 +64,7 @@ export async function saveRecord(kv, record) {
 }
 
 async function updateUserIndex(kv, record) {
-  const key = `${USER_PREFIX}${record.sub}`;
+  const key = `${USER_PREFIX}${keySegment(record.sub)}`;
   const idx = (await getJSON(kv, key)) || { sub: record.sub, name: record.name, records: [] };
   idx.name = record.name || idx.name;
   if (!idx.records.includes(record.id)) idx.records.push(record.id);

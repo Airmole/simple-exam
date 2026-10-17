@@ -47,8 +47,38 @@ export function getConfig(env) {
   };
 }
 
+function looksLikeKV(v) {
+  return !!v && typeof v.get === 'function' && typeof v.put === 'function' && typeof v.delete === 'function';
+}
+
+/**
+ * 取 KV 绑定。
+ *
+ * EdgeOne Makers 把「绑定命名空间」时填写的变量名注入为运行时**全局变量**，
+ * 官方示例直接写 `my_kv.get(...)`，它并不在 `context.env` 上（env 只有环境变量），
+ * 所以 `env.EXAM_KV` 永远取不到东西。
+ *
+ * 这里按三条路径依次尝试，兼容其他运行时把绑定挂在 env 上的情况：
+ * 1. 全局变量（EdgeOne 实际行为）
+ * 2. env[绑定名]
+ * 3. env.EXAM_KV 兜底
+ */
 export function getKV(env, config) {
-  const kv = (env || {})[config.kvBinding] || (env || {}).EXAM_KV;
-  if (!kv) throw new Error(`未找到 KV 绑定，请在项目中绑定命名空间并把变量名设为 ${config.kvBinding}`);
-  return kv;
+  const names = [...new Set([config.kvBinding, 'EXAM_KV'].filter(Boolean))];
+  const candidates = [];
+  for (const name of names) {
+    // eslint-disable-next-line no-undef
+    candidates.push([name, globalThis[name]]);
+    candidates.push([`env.${name}`, (env || {})[name]]);
+  }
+  for (const [label, value] of candidates) {
+    if (looksLikeKV(value)) return value;
+  }
+  const seen = candidates
+    .filter(([, v]) => v !== undefined && v !== null)
+    .map(([label, v]) => `${label}(type=${typeof v})`);
+  const hint = seen.length ? `当前读到的值：${seen.join(', ')}` : '运行时没有读到任何同名绑定';
+  throw new Error(
+    `未找到 KV 绑定：请在项目「KV 存储」中绑定命名空间，并把变量名设为 ${config.kvBinding}（${hint}）`,
+  );
 }

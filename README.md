@@ -37,7 +37,7 @@ edge-functions/
     config.js                  # 环境变量读取
     questions.js               # 题库与随机抽题
     scoring.js                 # 判分
-    store.js                   # KV 数据模型与统计
+    store.js                   # KV 数据模型、key 规范与统计
     http.js                    # 响应工具
 test/                          # 本地测试（不入生产构建）
   run.mjs                      # 接口集成测试
@@ -64,7 +64,19 @@ test/                          # 本地测试（不入生产构建）
 
 ### 3. 绑定 KV 命名空间
 
-项目设置 → 存储绑定 → 选择上一步的命名空间，**变量名填 `EXAM_KV`**（与 `KV_BINDING` 一致，否则接口报「未找到 KV 绑定」）。
+项目设置 → **KV 存储** → 绑定命名空间，**变量名填 `EXAM_KV`**（与 `KV_BINDING` 一致）。
+
+> 绑定名不是环境变量：EdgeOne 会把它注入成运行时**全局变量**，函数里直接 `EXAM_KV.get(...)` 访问，
+> 不在 `context.env` 上。`getKV()` 优先读全局，其次兼容 `env[绑定名]`。
+
+### 1.1 排查「未找到 KV 绑定」
+
+按顺序看：
+
+1. 绑定是不是加在**这个**项目上（同名项目容易点错），且变量名与 `KV_BINDING` 完全一致（大小写敏感）。
+2. 绑定是在**当前生效的那次部署之后**才加的 —— 在「部署」里对最新提交重新构建一次，函数才会拿到新绑定。
+3. 看接口返回：`/api/*` 现在会返回 `503 { code: "KV_BINDING_MISSING", binding: "EXAM_KV", error: "..." }`，
+   `error` 里会带上运行时实际读到的同名值类型，能区分「没读到」和「读到了但不是 KV 对象」。
 
 ### 4. 配置环境变量
 
@@ -109,7 +121,7 @@ https://dji-exam.airmole.cn/api/auth/callback
 | `EXAM_PASS_SCORE` | `80` | 及格分 |
 | `EXAM_DURATION_MINUTES` | `60` | 考试时长（分钟） |
 | `ADMIN_USERS` | 空 | 管理后台白名单，逗号分隔 |
-| `KV_BINDING` | `EXAM_KV` | KV 绑定的运行时变量名 |
+| `KV_BINDING` | `EXAM_KV` | KV 绑定的运行时变量名（控制台「KV 存储 → 绑定命名空间」里填的名字） |
 
 > `ADMIN_USERS` 支持填 OneID 的 `preferred_username`、`email`、`mobile` 或 `sub`，匹配时忽略大小写。
 
@@ -135,12 +147,15 @@ https://dji-exam.airmole.cn/api/auth/callback
 
 | Key | 内容 |
 | --- | --- |
-| `exam:record:<id>` | 单次答题记录，含逐题明细（题目、正确答案、用户答案） |
-| `exam:user:<sub>` | 用户索引：全部记录 ID、最高分、最快用时、考试次数 |
-| `exam:paper:<sub>` | 进行中的试卷（含 TTL，用于服务端判分） |
-| `exam:stats` | 汇总统计：人数、次数、合格数、分数和、最快/最慢用时 |
+| `exam_record_<id>` | 单次答题记录，含逐题明细（题目、正确答案、用户答案） |
+| `exam_user_<sub>` | 用户索引：全部记录 ID、最高分、最快用时、考试次数 |
+| `exam_paper_<sub>` | 进行中的试卷（含 TTL，用于服务端判分） |
+| `exam_stats` | 汇总统计：人数、次数、合格数、分数和、最快/最慢用时 |
 
-排名不额外落库，由 `exam:record:` 前缀扫描后在内存聚合，避免维护多份索引导致不一致。
+EdgeOne KV 的 key 只允许**数字、字母、下划线**（≤ 512B），所以分隔符用 `_`，
+`sub` 里的 `:`、`.`、`-` 等字符会先编码成 `_`（见 `store.js` 的 `keySegment`）。
+
+排名不额外落库，由 `exam_record_` 前缀扫描后在内存聚合，避免维护多份索引导致不一致。
 
 > EdgeOne KV 为最终一致性（跨节点最长 60s 可见），排名与统计的秒级延迟属预期行为。
 
@@ -155,6 +170,9 @@ node test/auth.mjs
 node test/dev-server.mjs
 # 打开 http://127.0.0.1:8787
 ```
+
+本地开发服务器把 mock KV 挂在全局 `EXAM_KV` 上，和 EdgeOne 线上行为一致；
+`mock-kv.js` 还会校验 key 字符合法性，key 写错在本地就会报错。
 
 本地登录：访问 `/api/auth/login`，mock 提供方默认签发「李四」；
 把跳转到的 `/mock-oidc/authorize` 地址末尾加上 `&user=code_admin` 即以管理员身份登录。
