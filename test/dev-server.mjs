@@ -12,9 +12,10 @@ const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const PORT = Number(process.env.PORT || 8787);
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 
+// EdgeOne 把 KV 绑定注入为全局变量，本地照着实情模拟，别在 env 上放一份假的
 const kv = createMockKV();
+globalThis.EXAM_KV = kv;
 const ENV = {
-  EXAM_KV: kv,
   SESSION_SECRET: 'dev-session-secret',
   SITE_URL: ORIGIN,
   OIDC_ISSUER: `${ORIGIN}/mock-oidc`,

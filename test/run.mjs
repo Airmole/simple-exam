@@ -3,8 +3,13 @@ import { handleApi } from '../edge-functions/api/_lib/router.js';
 import { createSession } from '../edge-functions/api/_lib/oidc.js';
 
 const kv = createMockKV();
+
+// EdgeOne 是把绑定名注入成「全局变量」的，env 里并没有它。
+// 这里照着实情模拟，顺便暴露 config.js 曾经只在 env 上找绑定的 bug。
+globalThis.EXAM_KV = kv;
+// 反向验证：env 上残留一个同名占位也不该影响取到真正的绑定
 const ENV = {
-  EXAM_KV: kv,
+  EXAM_KV: 'kv-binding-name-not-the-object',
   SESSION_SECRET: 'test-secret',
   SITE_URL: 'https://dji-exam.airmole.cn',
   ADMIN_USERS: 'admin@corp.com,张三',
@@ -43,6 +48,25 @@ async function sessionCookie(user) {
 const student = { sub: 'u_student_1', name: '李四', username: 'lisi', email: 'lisi@corp.com' };
 const other = { sub: 'u_student_2', name: '王五', username: 'wangwu', email: 'wangwu@corp.com' };
 const adminUser = { sub: 'u_admin', name: '管理员', username: 'admin', email: 'admin@corp.com' };
+
+console.log('\n[0] KV 绑定解析');
+{
+  const { getConfig, getKV } = await import('../edge-functions/api/_lib/config.js');
+  const config = getConfig(ENV);
+  check('默认绑定名 EXAM_KV', config.kvBinding === 'EXAM_KV');
+  check('优先取运行时全局绑定', getKV(ENV, config) === kv);
+  check('env 上的非对象占位不会误用', getKV(ENV, config) !== 'kv-binding-name-not-the-object');
+
+  // 全局没有时回退 env[绑定名]（兼容把绑定挂在 env 的运行时）
+  const saved = globalThis.EXAM_KV;
+  delete globalThis.EXAM_KV;
+  check('全局缺失时回退 env.EXAM_KV', getKV({ EXAM_KV: kv }, config) === kv);
+  check('自定义 KV_BINDING 生效', getKV({ EXAM_STORE: kv }, getConfig({ KV_BINDING: 'EXAM_STORE' })) === kv);
+  let err = null;
+  try { getKV({}, config); } catch (e) { err = e; }
+  check('完全缺失时报错并提示绑定名', !!err && err.message.includes('EXAM_KV'), String(err && err.message));
+  globalThis.EXAM_KV = saved;
+}
 
 console.log('\n[1] 公开接口');
 {
@@ -211,7 +235,22 @@ console.log('\n[9] 用时不可伪造（客户端 startedAt 不能把用时报�
   check('用时不会被压成负数', r.json.durationMs >= 0, String(r.json.durationMs));
 }
 
-console.log('\n[10] 登出与未知接口');
+console.log('\n[10] KV key 规范（EdgeOne 只允许数字/字母/下划线）');
+{
+  const keyOk = /^[0-9A-Za-z_]+$/;
+  const bad = [...kv.store.keys()].filter((k) => !keyOk.test(k));
+  check('所有落库 key 合法', bad.length === 0, bad.slice(0, 3).join(','));
+  check('统计 key 为 exam_stats', kv.store.has('exam_stats'));
+  // sub 里带特殊字符也不能把 key 弄脏
+  const c = await sessionCookie({ sub: 'oidc|user:01.x-y', name: '特殊字符', username: 'sp' });
+  const start = await call('POST', '/api/exam/start', { cookie: c, body: {} });
+  check('特殊字符 sub 可开考', start.status === 200, start.text);
+  const dirty = [...kv.store.keys()].filter((k) => !keyOk.test(k));
+  check('特殊字符 sub 落库 key 仍合法', dirty.length === 0, dirty.slice(0, 3).join(','));
+  await call('POST', '/api/exam/submit', { cookie: c, body: { answers: {} } });
+}
+
+console.log('\n[11] 登出与未知接口');
 {
   const c = await sessionCookie(student);
   const r = await call('GET', '/api/auth/logout', { cookie: c });
