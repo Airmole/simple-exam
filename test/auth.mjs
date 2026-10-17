@@ -1,4 +1,4 @@
-import { buildAuthorizeUrl, createFlow, createSession, readSession, isAdmin, normalizeUser, redirectUri, exchangeCode } from '../edge-functions/api/_lib/oidc.js';
+import { buildAuthorizeUrl, clientAuthMethods, createFlow, createSession, readSession, isAdmin, normalizeUser, redirectUri, exchangeCode } from '../edge-functions/api/_lib/oidc.js';
 import { hmacSign, hmacVerify, encryptJSON, decryptJSON, sha256b64url, b64urlEncode } from '../edge-functions/api/_lib/crypto.js';
 
 let pass = 0, fail = 0;
@@ -118,6 +118,78 @@ console.log('\n[6] token 请求的报文（曾经在这里 500）');
     const [decodedId, ...rest] = decodedPair.split(':');
     check('client_id 可还原', decodeURIComponent(decodedId) === config.oidcClientId, decodedPair);
     check('client_secret 可还原', decodeURIComponent(rest.join(':')) === config.oidcClientSecret, decodedPair);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+console.log('\n[7] 客户端认证方式的兜底');
+{
+  const meta = {
+    issuer: config.oidcIssuer,
+    authorization_endpoint: `${config.oidcIssuer}/authorize`,
+    token_endpoint: `${config.oidcIssuer}/token`,
+    userinfo_endpoint: `${config.oidcIssuer}/userinfo`,
+  };
+  const realFetch = globalThis.fetch;
+  let calls = [];
+  // 模拟「只认 client_secret_post」的提供方：Basic 一律回 invalid_client
+  globalThis.fetch = async (url, init) => {
+    if (!String(url).endsWith('/token')) {
+      return new Response(JSON.stringify(meta), { headers: { 'content-type': 'application/json' } });
+    }
+    const headers = Object.fromEntries(
+      Object.entries(init.headers || {}).map(([k, v]) => [k.toLowerCase(), v]),
+    );
+    const params = new URLSearchParams(String(init.body));
+    const auth = headers.authorization || '';
+    const creds = auth.startsWith('Basic ')
+      ? Buffer.from(auth.slice(6), 'base64').toString('utf8')
+      : `${params.get('client_id')}:${params.get('client_secret')}`;
+    calls.push({ authorization: auth, body: String(init.body) });
+    const expected = `${config.oidcClientId}:${config.oidcClientSecret}`;
+    if (auth) {
+      return new Response(JSON.stringify({ error: 'invalid_client' }), {
+        status: 401, headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (creds !== expected) {
+      return new Response(JSON.stringify({ error: 'invalid_client' }), {
+        status: 401, headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({ access_token: 'at2', id_token: 'x.y.z' }), {
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+
+  try {
+    check('默认先 basic 再 post', clientAuthMethods(config).join(',') === 'basic,post');
+    check('配置可指定首选', clientAuthMethods({ ...config, oidcClientAuthMethod: 'post' }).join(',') === 'post,basic');
+
+    const req = new Request('https://dji-exam.airmole.cn/api/auth/callback');
+    const token = await exchangeCode(req, config, 'code-2', 'verifier-2');
+    check('basic 被拒后改用 post 换成 token', token.access_token === 'at2', JSON.stringify(token));
+    check('共发了两次请求', calls.length === 2, `实际 ${calls.length}`);
+    const second = new URLSearchParams(calls[1].body);
+    check('post 方式不带 Authorization 头', !calls[1].authorization, calls[1].authorization);
+    check('post 方式把凭据放进表单', second.get('client_id') === config.oidcClientId && second.get('client_secret') === config.oidcClientSecret, calls[1].body);
+    check('两种方式都带 PKCE verifier', calls.every((c) => new URLSearchParams(c.body).get('code_verifier') === 'verifier-2'));
+
+    // 只认 post 的提供方 + 配置直接指定 post：只发一次
+    calls = [];
+    const token2 = await exchangeCode(req, { ...config, oidcClientAuthMethod: 'post' }, 'code-3', 'v3');
+    check('指定 post 时一次成功', token2.access_token === 'at2' && calls.length === 1, `实际 ${calls.length} 次`);
+
+    // 凭据本身错了就不该反复重试，也不该把 secret 泄露在错误里
+    calls = [];
+    let err = '';
+    try {
+      await exchangeCode(req, { ...config, oidcClientSecret: 'wrong' }, 'code-4', 'v4');
+    } catch (e) { err = e.message; }
+    check('凭据错误时抛错', /换取 token 失败/.test(err), err);
+    check('报错里不含明文密钥', !err.includes('wrong'), err);
+    check('凭据错误也试过两种方式', calls.length === 2, `实际 ${calls.length}`);
   } finally {
     globalThis.fetch = realFetch;
   }

@@ -31,6 +31,9 @@ export function getConfig(env) {
     oidcIssuer: e.OIDC_ISSUER || '',
     oidcClientId: e.OIDC_CLIENT_ID || '',
     oidcClientSecret: e.OIDC_CLIENT_SECRET || '',
+    // 客户端认证方式：basic（Authorization 头）或 post（表单里带 client_secret）
+    // 留空则先试 basic，OneID 回 invalid_client 时自动换 post
+    oidcClientAuthMethod: e.OIDC_CLIENT_AUTH_METHOD || '',
     oidcScopes: e.OIDC_SCOPES || 'openid profile',
     // 考试规则
     questionCount,
