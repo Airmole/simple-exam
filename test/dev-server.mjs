@@ -86,6 +86,14 @@ async function handleMockOidc(req, res) {
     return res.end();
   }
   if (url.pathname === '/mock-oidc/token') {
+    // 真 OneID 走 client_secret_basic，这里照着校验，免得凭据编码错了本地还跑得通
+    const auth = req.headers.authorization || '';
+    const decoded = auth.startsWith('Basic ')
+      ? Buffer.from(auth.slice(6), 'base64').toString('utf8').split(':').map(decodeURIComponent).join(':')
+      : '';
+    if (decoded !== `${ENV.OIDC_CLIENT_ID}:${ENV.OIDC_CLIENT_SECRET}`) {
+      return json(res, { error: 'invalid_client', error_description: 'missing client_secret' }, 401);
+    }
     let body = '';
     for await (const chunk of req) body += chunk;
     const params = new URLSearchParams(body);
