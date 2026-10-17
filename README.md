@@ -166,3 +166,4 @@ node test/dev-server.mjs
 - 会话 Cookie 为 HttpOnly + SameSite=Lax，载荷经 AES-GCM 加密并用 HMAC-SHA256 签名，密钥即 `SESSION_SECRET`。
 - OIDC 使用授权码 + PKCE（S256）与 state 校验，防重放与 CSRF。
 - 管理后台在服务端做白名单校验，前端仅控制入口显示。
+
