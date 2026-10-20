@@ -2,6 +2,7 @@
 import { api } from '../api.js';
 import { h, fmtDuration, fmtDateTime } from '../util.js';
 import { topbar, errorCard } from '../components.js';
+import { closedNotice } from '../config.js';
 
 export async function renderRanking({ navigate }) {
   let meta;
@@ -14,6 +15,7 @@ export async function renderRanking({ navigate }) {
     return { element: h('div', { class: 'app' }, [topbar(), errorCard(e, { onRetry: () => navigate('#/ranking') })]), title: '加载失败' };
   }
 
+  const closed = closedNotice();
   const mySub = meta.user ? meta.user.sub : null;
   const myRow = mySub ? ranking.find((r) => r.sub === mySub) : null;
 
@@ -53,7 +55,7 @@ export async function renderRanking({ navigate }) {
         : null,
       h('div', { class: 'mt' }, [table]),
       h('div', { class: 'btn-row mt' }, [
-        h('button', { class: 'btn btn-primary', text: '去考试', onClick: () => navigate('#/exam') }),
+        closed ? null : h('button', { class: 'btn btn-primary', text: '去考试', onClick: () => navigate('#/exam') }),
         h('button', { class: 'btn', text: '返回首页', onClick: () => navigate('#/') }),
         h('button', { class: 'btn', text: '刷新', onClick: () => navigate('#/ranking') }),
       ]),

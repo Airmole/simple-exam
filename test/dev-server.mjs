@@ -10,6 +10,7 @@ import { handleApi } from '../edge-functions/api/_lib/router.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const PORT = Number(process.env.PORT || 8787);
+// 可选：设置后本地即可查看考试已截止的界面（对应 public/js/config.js 的 DEADLINE）
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 
 // EdgeOne 把 KV 绑定注入为全局变量，本地照着实情模拟，别在 env 上放一份假的
@@ -55,6 +56,14 @@ function json(res, data, status = 200) {
 async function serveStatic(req, res) {
   const url = new URL(req.url, ORIGIN);
   let filePath = path.join(PUBLIC_DIR, decodeURIComponent(url.pathname));
+
+  // 本地验证考试截止状态：EXAM_DEADLINE='2026-01-31 23:59' node test/dev-server.mjs
+  if (process.env.EXAM_DEADLINE && url.pathname === '/js/config.js') {
+    const src = fs.readFileSync(filePath, 'utf8').replace(/^const DEADLINE = .*$/m, `const DEADLINE = '${process.env.EXAM_DEADLINE}';`);
+    res.writeHead(200, { 'content-type': MIME['.js'] });
+    return res.end(src);
+  }
+
   if (url.pathname === '/' || url.pathname === '') filePath = path.join(PUBLIC_DIR, 'index.html');
   if (!filePath.startsWith(PUBLIC_DIR)) { res.writeHead(403); return res.end('forbidden'); }
   if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) filePath = path.join(PUBLIC_DIR, 'index.html');

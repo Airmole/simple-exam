@@ -13,6 +13,7 @@
 | --- | --- |
 | 登录认证 | OneID OIDC 授权码 + PKCE，会话用 AES-GCM 加密 + HMAC 签名的 HttpOnly Cookie |
 | 考试规则 | 开始前展示题目数、每题分数、满分、及格分、时长；有后台权限才显示入口 |
+| 考试截止 | 截止后隐藏所有开始考试的入口（首页、排名页、成绩页、答题页），提示已到截止时间 |
 | 答题过程 | 实时显示开始时间、已用时长、剩余时长、已答题数、剩余题目、当前题的原题号；答题卡可跳转 |
 | 交卷判分 | 服务端判分（正确答案不下发前端），满分 100，80 分合格；不合格提示重考 |
 | 成绩记录 | 姓名、开始/结束时间、用时、逐题作答（题目 + 正确答案 + 用户答案） |
@@ -26,7 +27,7 @@ data/questions.json            # 题库（100 题）
 public/                        # 静态前端（构建输出目录）
   index.html
   css/style.css
-  js/{app,api,util,components}.js
+  js/{app,api,util,components,config}.js
   js/pages/{home,exam,result,ranking,admin}.js
 edge-functions/
   api/[[default]].js           # 统一入口，/api/* 全走这里
@@ -136,6 +137,9 @@ https://dji-exam.airmole.cn/api/auth/callback
 | `EXAM_DURATION_MINUTES` | `60` | 考试时长（分钟） |
 | `ADMIN_USERS` | 空 | 管理后台白名单，逗号分隔 |
 | `KV_BINDING` | `EXAM_KV` | KV 绑定的运行时变量名（控制台「KV 存储 → 绑定命名空间」里填的名字） |
+
+> 考试截止时间在前端配置：`public/js/config.js` 里的 `DEADLINE`（本地时间，如 `2026-01-31 23:59`）。
+> 留空表示不限；填一个过去的时间即进入截止状态，页面会隐藏所有开始考试入口并统一提示，无需重新部署后端。
 
 > `ADMIN_USERS` 支持填 OneID 的 `preferred_username`、`email`、`mobile` 或 `sub`，匹配时忽略大小写。
 

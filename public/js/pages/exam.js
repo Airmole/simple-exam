@@ -2,6 +2,7 @@
 import { api } from '../api.js';
 import { h, fmtCountdown, fmtTime, toast, draftStore, notice } from '../util.js';
 import { topbar, errorCard } from '../components.js';
+import { closedNotice } from '../config.js';
 
 const OPTION_KEYS = ['A', 'B', 'C', 'D', 'E', 'F'];
 
@@ -11,6 +12,27 @@ export async function renderExam({ navigate, setLeaveGuard }) {
     meta = await api.meta();
   } catch (e) {
     return { element: h('div', { class: 'app' }, [topbar(), errorCard(e)]), title: '加载失败' };
+  }
+
+  // 考试结束后不再抽取新试卷，直接拦在答题页外面
+  const closed = closedNotice();
+  const draft = draftStore.load();
+  const hasDraft = !!closed && draft && draft.sub === meta.user?.sub && draft.expiresAt > Date.now();
+  if (closed && !hasDraft) {
+    return {
+      element: h('div', { class: 'app' }, [
+        topbar(meta),
+        h('div', { class: 'card' }, [
+          h('h2', { text: '考试已截止' }),
+          notice('warn', closed),
+          h('div', { class: 'btn-row mt' }, [
+            h('button', { class: 'btn btn-primary', text: '查看成绩排名', onClick: () => navigate('#/ranking') }),
+            h('button', { class: 'btn', text: '返回首页', onClick: () => navigate('#/') }),
+          ]),
+        ]),
+      ]),
+      title: '考试已截止',
+    };
   }
 
   if (!meta.user) {
