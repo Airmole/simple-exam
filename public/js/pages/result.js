@@ -2,6 +2,7 @@
 import { api } from '../api.js';
 import { h, fmtDateTime, fmtDuration, notice } from '../util.js';
 import { topbar, errorCard } from '../components.js';
+import { closedNotice } from '../config.js';
 
 const PAD = (children) => h('div', { class: 'app' }, children);
 
@@ -33,6 +34,7 @@ export async function renderResult({ params, navigate }) {
     }
   }
 
+  const closed = closedNotice();
   const detailMap = new Map((result.details || []).map((d) => [d.id, d]));
   const questions = result.questions || [];
   const pointsPer = result.rules?.pointsPerQuestion ?? 2;
@@ -56,10 +58,12 @@ export async function renderResult({ params, navigate }) {
       statBox('答对题数', `${result.correctCount} / ${result.total}`),
     ]),
     h('div', { class: 'btn-row mt' }, [
-      h('button', {
-        class: 'btn btn-primary', text: '再考一次',
-        onClick: () => { clearStored(params.recordId); navigate('#/exam'); },
-      }),
+      closed
+        ? h('div', { class: 'notice notice-warn', text: closed })
+        : h('button', {
+          class: 'btn btn-primary', text: '再考一次',
+          onClick: () => { clearStored(params.recordId); navigate('#/exam'); },
+        }),
       h('button', { class: 'btn', text: '查看成绩排名', onClick: () => navigate('#/ranking') }),
       h('button', { class: 'btn', text: '返回首页', onClick: () => navigate('#/') }),
     ]),

@@ -2,6 +2,7 @@
 import { api, loginUrl } from '../api.js';
 import { h, notice } from '../util.js';
 import { topbar, rulesCard, errorCard } from '../components.js';
+import { closedNotice } from '../config.js';
 
 export async function renderHome({ navigate }) {
   let meta;
@@ -13,13 +14,16 @@ export async function renderHome({ navigate }) {
 
   const rules = meta.rules;
   const loggedIn = !!meta.user;
+  const closed = closedNotice();
   const authError = new URLSearchParams(location.search).get('auth_error');
 
   const children = [
     topbar(meta),
     h('div', { class: 'card' }, [
       h('h1', { text: '大疆机场 4 认证考试' }),
-      h('p', { class: 'muted', text: '请先阅读考试规则，确认无误后开始答题。考试过程中请勿关闭或刷新页面。' }),
+      closed
+        ? h('p', { class: 'muted', text: '本次考试已结束，以下为考试规则留存，供查阅。' })
+        : h('p', { class: 'muted', text: '请先阅读考试规则，确认无误后开始答题。考试过程中请勿关闭或刷新页面。' }),
       rulesCard(rules),
       h('h3', { text: '考试说明' }),
       h('ul', { class: 'muted', style: 'margin:0;padding-left:20px' }, [
@@ -30,9 +34,11 @@ export async function renderHome({ navigate }) {
         h('li', { text: `${rules.passScore} 分以下可重新参加考试，多次考试成绩取最高分参与排名。` }),
       ]),
       h('div', { class: 'btn-row mt' }, [
-        loggedIn
-          ? h('button', { class: 'btn btn-primary', onClick: () => navigate('#/exam'), text: '开始考试' })
-          : h('a', { class: 'btn btn-primary', href: loginUrl() }, ['使用腾讯 OneID 登录答题']),
+        closed
+          ? null
+          : loggedIn
+            ? h('button', { class: 'btn btn-primary', onClick: () => navigate('#/exam'), text: '开始考试' })
+            : h('a', { class: 'btn btn-primary', href: loginUrl() }, ['使用腾讯 OneID 登录答题']),
         h('button', { class: 'btn', onClick: () => navigate('#/ranking'), text: '查看成绩排名' }),
         loggedIn && meta.isAdmin
           ? h('button', { class: 'btn', onClick: () => navigate('#/admin'), text: '进入管理后台' })
@@ -42,8 +48,9 @@ export async function renderHome({ navigate }) {
   ];
 
   if (authError) children.splice(1, 0, h('div', { class: 'card' }, [notice('bad', `登录失败：${authError}`)]));
+  if (closed) children.splice(1, 0, h('div', { class: 'card' }, [notice('warn', closed)]));
   if (loggedIn) {
-    children.splice(authError ? 2 : 1, 0, h('div', { class: 'card' }, [
+    children.splice((authError ? 1 : 0) + (closed ? 1 : 0) + 1, 0, h('div', { class: 'card' }, [
       notice('ok', `已登录：${meta.user.name}${meta.isAdmin ? '（管理后台权限）' : ''}`),
     ]));
   }
