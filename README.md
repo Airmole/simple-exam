@@ -10,15 +10,11 @@
 
 ## 一键部署
 
-<a href="https://edgeone.ai/pages/new?from=github&template=https://github.com/Airmole/simple-exam" target="_blank">
+<a href="https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2FAirmole%2Fsimple-exam&output-directory=public&root-directory=.%2F" target="_blank">
   <img src="https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg" alt="使用 EdgeOne Pages 部署" height="32">
 </a>
 
 点上面的按钮，把本仓库导入自己的 EdgeOne Pages 项目。
-
-> 部署按钮的格式与参数说明见官方文档：[部署按钮](https://pages.edgeone.ai/zh/document/deploy-button)。
-> 若你的仓库地址不是 `Airmole/simple-exam`，把上面链接里的 `template` 参数换成自己的仓库地址即可
-> （GitHub 用完整仓库 URL，其他平台可用对应导入地址）。
 
 导入后按下面的「部署到 EdgeOne」补齐构建配置、KV 绑定与环境变量。
 
