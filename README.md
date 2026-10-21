@@ -11,7 +11,7 @@
 
 ## 一键部署
 
-<a href="https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2FAirmole%2Fsimple-exam&output-directory=.%2Fpublic&root-directory=.%2F" target="_blank">
+<a href="https://console.cloud.tencent.com/edgeone/makers/new?repository-url=https%3A%2F%2Fgithub.com%2FAirmole%2Fsimple-exam&output-directory=.%2Fpublic&root-directory=.%2F&env=SITE_URL%2CSITE_NAME%2CSITE_LOGO%2CBRAND_COLOR%2CEXAM_QUESTION_COUNT%2CEXAM_POINTS_PER_QUESTION%2CEXAM_PASS_SCORE%2CEXAM_DURATION_MINUTES%2CADMIN_PASSWORD_LOGIN%2CADMIN_PASSWORD%2CSESSION_SECRET" target="_blank">
   <img src="https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg" alt="使用 EdgeOne Pages 部署" height="32">
 </a>
 
