@@ -259,6 +259,19 @@ export async function buildLogoutUrl(config, { idTokenHint, postLogoutRedirect }
   return url.toString();
 }
 
+// OneID 只在应用里登记过登出回跳地址时才认 post_logout_redirect_uri：
+// 没登记就回 invalid_request + Invalid post_logout_redirect_uri，页面停在一坨 JSON 上。
+// 这里先探一次，让调用方决定是去 OneID 还是自己回站内。
+// 拿不到明确答复（网络抖动、5xx）就当作受理，别因为探测失败挡了正常登出。
+export async function logoutAccepted(logoutUrl) {
+  try {
+    const res = await fetch(logoutUrl, { method: 'GET', redirect: 'manual' });
+    return res.status < 400;
+  } catch {
+    return true;
+  }
+}
+
 export function normalizeUser(userInfo, idClaims) {
   const claims = { ...idClaims, ...userInfo };
   const sub = String(claims.sub || '');

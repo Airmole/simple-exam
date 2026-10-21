@@ -1,7 +1,7 @@
 // /api/* 路由分发
 import { getConfig, getKV } from './config.js';
 import { fail, noContent, ok, readJSON, withCookies } from './http.js';
-import { cookies, createFlow, createSession, exchangeCode, fetchUserInfo, isAdmin, normalizeUser, readFlow, readSession, decodeIdTokenClaims, buildLogoutUrl } from './oidc.js';
+import { cookies, createFlow, createSession, exchangeCode, fetchUserInfo, isAdmin, normalizeUser, readFlow, readSession, decodeIdTokenClaims, buildLogoutUrl, logoutAccepted } from './oidc.js';
 import { drawQuestions, getBankSize } from './questions.js';
 import { gradeSubmission } from './scoring.js';
 import { buildRanking, getRecord, getStats, listRecords, paperKey, saveRecord } from './store.js';
@@ -142,18 +142,31 @@ async function handleCallback(request, config) {
   );
 }
 
-// 登出：先在自己这里清掉会话 cookie，再 302 到 OneID 的 fclogout。
-// 不用 POST 表单：OneID 的 fclogout 只收 GET，405 之外还可能被网关 WAF 拦成 501。
-// id_token 上千字符，URL 可能超长被截断，所以在自己这一跳把 cookie 清掉，
-// 即便 OneID 那边走不完，本站也已经退出，不会卡在「点登出还是登录态」。
+// 站内地址才自己跳，外站回跳地址只交给 OneID 用
+function sameSite(request, target) {
+  try {
+    return new URL(target, request.url).origin === new URL(request.url).origin;
+  } catch {
+    return false;
+  }
+}
+
+// 登出：本站这一跳就把会话 cookie 清掉，再交给 OneID 的 fclogout 收尾。
+//
+// OneID 只在应用里登记过登出回跳地址时才肯把人送回 post_logout_redirect_uri，
+// 没登记就回 invalid_request + Invalid post_logout_redirect_uri，把人晾在 JSON 报错页上。
+// 所以先探一眼：受理了才让浏览器去 OneID，被拒就自己回首页——
+// 反正 cookie 已经清了，本站已是未登录状态，点登录能重新走授权。
+// 不用 POST 表单：fclogout 只收 GET，POST 回 405。
 async function handleLogout(request, config) {
   const session = await readSession(request, config.sessionSecret);
   const url = new URL(request.url);
-  const postLogout = `${config.siteUrl || url.origin}/`;
+  const postLogout = config.logoutRedirectUri || redirectTo(request, '/', config);
   const idTokenHint = (session && session.idToken) || '';
   const logoutUrl = await buildLogoutUrl(config, { idTokenHint, postLogoutRedirect: postLogout });
-  const target = logoutUrl || redirectTo(request, '/', config);
-  return withCookies(Response.redirect(target, 302), cookies.clearSession(request));
+  const backHome = sameSite(request, postLogout) ? postLogout : redirectTo(request, '/', config);
+  const accepted = logoutUrl ? await logoutAccepted(logoutUrl) : false;
+  return withCookies(Response.redirect(accepted ? logoutUrl : backHome, 302), cookies.clearSession(request));
 }
 
 async function handleMe(request, config) {

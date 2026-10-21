@@ -253,6 +253,64 @@ console.log('\n[10] KV key 规范（EdgeOne 只允许数字/字母/下划线）'
 
 console.log('\n[11] 登出与未知接口');
 {
+  // 线上现状：OneID 应用里没登记登出回跳地址，fclogout 回 invalid_request。
+  // 这时候不能再把人扔过去看 JSON 报错页，得自己回站内。
+  const rejectFetch = async (url) => (String(url).includes('/fclogout')
+    ? new Response(JSON.stringify({ error: 'invalid_request' }), { status: 400 })
+    : realFetch(url));
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = rejectFetch;
+  try {
+    const c = await sessionCookie(student);
+    const r = await call('GET', '/api/auth/logout', { cookie: c });
+    const location = r.headers.get('location') || '';
+    check('回跳被拒时退回本站首页', location === 'https://dji-exam.airmole.cn/', location);
+    check('回跳被拒时也清了会话 cookie', /exam_session=;/.test(String(r.headers.getSetCookie ? r.headers.getSetCookie().join(';') : r.headers.get('set-cookie'))));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  // OneID 受理（302 到回跳地址）时才把人交给 fclogout
+  const acceptFetch = async (url) => (String(url).includes('/fclogout')
+    ? new Response(null, { status: 302, headers: { location: 'https://dji-exam.airmole.cn/' } })
+    : realFetch(url));
+  globalThis.fetch = acceptFetch;
+  try {
+    const c = await sessionCookie(student);
+    const r = await call('GET', '/api/auth/logout', { cookie: c });
+    check('受理时仍跳 OneID', String(r.headers.get('location')).includes('/fclogout'), String(r.headers.get('location')));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  // 后面这几项只看跳转地址怎么拼，固定成「OneID 受理」免得受网络影响
+  globalThis.fetch = acceptFetch;
+  try {
+    await checkLogoutTargets();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  // 回跳地址配成外站、且 OneID 不认时，本站只该回自己家，别把人送去别人的域名
+  globalThis.fetch = rejectFetch;
+  try {
+    const req = new Request('https://dji-exam.airmole.cn/api/auth/logout');
+    const saved = ENV.OIDC_LOGOUT_REDIRECT_URI;
+    ENV.OIDC_LOGOUT_REDIRECT_URI = 'https://evil.example.com/';
+    let loc;
+    try {
+      loc = (await handleApi({ request: req, env: ENV, params: {} })).headers.get('location');
+    } finally {
+      if (saved === undefined) delete ENV.OIDC_LOGOUT_REDIRECT_URI;
+      else ENV.OIDC_LOGOUT_REDIRECT_URI = saved;
+    }
+    check('外站回跳地址只回本站首页', loc === 'https://dji-exam.airmole.cn/', String(loc));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+async function checkLogoutTargets() {
   const c = await sessionCookie(student);
   const r = await call('GET', '/api/auth/logout', { cookie: c });
   check('logout 302', r.status === 302, String(r.status));
@@ -263,6 +321,18 @@ console.log('\n[11] 登出与未知接口');
   check('logout 跳到 OneID 的 fclogout', out.origin + out.pathname === `${ENV.OIDC_ISSUER}/fclogout`, location);
   check('logout 带 client_id', out.searchParams.get('client_id') === ENV.OIDC_CLIENT_ID, location);
   check('logout 带回跳地址', out.searchParams.get('post_logout_redirect_uri') === 'https://dji-exam.airmole.cn/', location);
+
+  // 回跳地址可配：填 OneID 里真正登记过的那个，别硬拼站点根
+  const savedEnv = { ...ENV };
+  ENV.OIDC_LOGOUT_REDIRECT_URI = 'https://dji-exam.airmole.cn/logout-done';
+  try {
+    const r2 = await call('GET', '/api/auth/logout', { cookie: c });
+    const loc2 = r2.headers.get('location') || '';
+    check('回跳地址取 OIDC_LOGOUT_REDIRECT_URI', new URL(loc2).searchParams.get('post_logout_redirect_uri') === ENV.OIDC_LOGOUT_REDIRECT_URI, loc2);
+  } finally {
+    delete ENV.OIDC_LOGOUT_REDIRECT_URI;
+    Object.assign(ENV, savedEnv);
+  }
   check('logout 清除会话 cookie', /exam_session=;/.test(String(r.headers.getSetCookie ? r.headers.getSetCookie().join(';') : r.headers.get('set-cookie'))));
   const me = await call('GET', '/api/auth/me', { cookie: c });
   check('me 仍可解析旧 cookie（无状态会话）', me.status === 200);

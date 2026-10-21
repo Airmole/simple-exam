@@ -1,4 +1,4 @@
-import { buildAuthorizeUrl, buildLogoutUrl, clientAuthMethods, createFlow, createSession, readSession, isAdmin, normalizeUser, redirectUri, exchangeCode } from '../edge-functions/api/_lib/oidc.js';
+import { buildAuthorizeUrl, buildLogoutUrl, logoutAccepted, clientAuthMethods, createFlow, createSession, readSession, isAdmin, normalizeUser, redirectUri, exchangeCode } from '../edge-functions/api/_lib/oidc.js';
 import { hmacSign, hmacVerify, encryptJSON, decryptJSON, sha256b64url, b64urlEncode } from '../edge-functions/api/_lib/crypto.js';
 
 let pass = 0, fail = 0;
@@ -244,6 +244,41 @@ console.log('\n[8] 登出地址');
     await buildAuthorizeUrl(new Request('https://dji-exam.airmole.cn/api/auth/login'), { ...config, oidcIssuer: issuer }, 's', 'c');
     const url = new URL(await buildLogoutUrl({ ...config, oidcIssuer: issuer }, {}));
     check('相对地址的 end_session_endpoint 被忽略', url.origin + url.pathname === `${issuer}/fclogout`, url.toString());
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+console.log('\n[9] 登出回跳地址被 OneID 拒绝时的探测');
+{
+  const realFetch = globalThis.fetch;
+  let seen = null;
+  const stub = (handler) => async (url, init) => { seen = { url: String(url), init }; return handler(); };
+
+  // 线上现状：应用里没登记登出回跳地址，fclogout 回 invalid_request
+  globalThis.fetch = stub(() => new Response(JSON.stringify({
+    error: 'invalid_request',
+    error_description: 'Invalid post_logout_redirect_uri (https://dji-exam.airmole.cn/)',
+  }), { status: 400, headers: { 'content-type': 'application/json' } }));
+  try {
+    const target = 'https://oauth2.account.tencent.com/authz/oidc/v2/app/fclogout?client_id=c';
+    check('回跳被拒时视为不受理', (await logoutAccepted(target)) === false);
+    check('探测用 GET（fclogout 不认 POST）', seen && seen.init.method === 'GET', JSON.stringify(seen && seen.init));
+    check('探测不跟随跳转（别在服务端把人跳走）', seen && seen.init.redirect === 'manual', JSON.stringify(seen && seen.init));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  globalThis.fetch = stub(() => new Response(null, { status: 302, headers: { location: 'https://dji-exam.airmole.cn/' } }));
+  try {
+    check('登记过回跳时视为受理（302）', (await logoutAccepted('https://oauth2.account.tencent.com/authz/oidc/v2/app/fclogout')) === true);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  globalThis.fetch = async () => { throw new TypeError('network'); };
+  try {
+    check('探测失败不挡登出', (await logoutAccepted('https://oauth2.account.tencent.com/authz/oidc/v2/app/fclogout')) === true);
   } finally {
     globalThis.fetch = realFetch;
   }

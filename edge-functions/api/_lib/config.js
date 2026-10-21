@@ -27,6 +27,8 @@ export function getConfig(env) {
   return {
     // 站点域名，用于拼接回调地址，例如 dji-exam.airmole.cn
     siteUrl: (e.SITE_URL || '').replace(/\/+$/, ''),
+    // 登出后回跳地址，必须是 OneID 应用里登记过的那个；留空则回站点首页
+    logoutRedirectUri: (e.OIDC_LOGOUT_REDIRECT_URI || '').trim(),
     // 腾讯 OneID OIDC
     oidcIssuer: e.OIDC_ISSUER || '',
     oidcClientId: e.OIDC_CLIENT_ID || '',

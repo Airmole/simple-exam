@@ -23,6 +23,8 @@ const ENV = {
   OIDC_CLIENT_ID: 'dev-client',
   OIDC_CLIENT_SECRET: 'dev-secret',
   OIDC_SCOPES: 'openid profile',
+  // 留空则回站点首页；填上本地 mock 登记过的地址可验证「去 OneID 再跳回来」
+  OIDC_LOGOUT_REDIRECT_URI: process.env.OIDC_LOGOUT_REDIRECT_URI || '',
   ADMIN_USERS: process.env.ADMIN_USERS || 'admin',
   EXAM_QUESTION_COUNT: '50',
   EXAM_POINTS_PER_QUESTION: '2',
@@ -44,6 +46,9 @@ const users = {
   code_student: { sub: 'u_stu1', name: '李四', preferred_username: 'lisi', email: 'lisi@corp.com' },
   code_student2: { sub: 'u_stu2', name: '王五', preferred_username: 'wangwu', email: 'wangwu@corp.com' },
 };
+// 已登记的登出回跳地址：照真 OneID 的规矩，没登记就回 invalid_request。
+// 置空可复现线上现状（Invalid post_logout_redirect_uri），验证「被拒也退回本站」。
+const LOGOUT_REDIRECTS = new Set([`${ORIGIN}/`, `${ORIGIN}/logout-done`]);
 const issuedCodes = new Map();
 const issuedTokens = new Map();
 
@@ -62,6 +67,18 @@ async function serveStatic(req, res) {
     const src = fs.readFileSync(filePath, 'utf8').replace(/^const DEADLINE = .*$/m, `const DEADLINE = '${process.env.EXAM_DEADLINE}';`);
     res.writeHead(200, { 'content-type': MIME['.js'] });
     return res.end(src);
+  }
+
+  // 登出后回跳的落地页：真站点也得有这么个页面，不然 OneID 跳回来是 404
+  if (url.pathname === '/logout-done' || url.pathname === '/logout-done/') {
+    const page = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>已退出登录</title><link rel="stylesheet" href="/css/style.css"></head>
+<body><main class="card" style="max-width:480px;margin:12vh auto">
+<h1>已退出登录</h1><p class="muted">本站与腾讯统一身份认证的会话都已结束。</p>
+<p><a class="btn" href="/api/auth/login">重新登录</a> <a href="/">回首页</a></p>
+</main></body></html>`;
+    res.writeHead(200, { 'content-type': MIME['.html'], 'cache-control': 'no-store' });
+    return res.end(page);
   }
 
   if (url.pathname === '/' || url.pathname === '') filePath = path.join(PUBLIC_DIR, 'index.html');
@@ -159,10 +176,11 @@ async function handleMockOidc(req, res) {
         error_description: 'Missing client_id',
       }, 400);
     }
-    if (params.get('post_logout_redirect_uri') !== `${ORIGIN}/`) {
+    const back = params.get('post_logout_redirect_uri') || '';
+    if (!LOGOUT_REDIRECTS.has(back)) {
       return json(res, {
         error: 'invalid_request',
-        error_description: `Invalid post_logout_redirect_uri (${params.get('post_logout_redirect_uri')})`,
+        error_description: `Invalid post_logout_redirect_uri (${back})`,
       }, 400);
     }
     res.writeHead(302, { location: params.get('post_logout_redirect_uri') });

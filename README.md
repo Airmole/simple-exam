@@ -116,6 +116,14 @@ https://dji-exam.airmole.cn/api/auth/callback
 
 （本地调试时改为 `http://127.0.0.1:8787/api/auth/callback`）
 
+同一页往下找「登出回跳地址 / 退出登录回调 / post_logout_redirect_uri」，
+登记 `https://dji-exam.airmole.cn/logout-done`（或站点首页），
+并把该地址填进 `OIDC_LOGOUT_REDIRECT_URI`。
+
+OneID 只认登记过的回跳地址，没登记就回 `invalid_request: Invalid post_logout_redirect_uri`。
+登出时我们会先探一次：受理了才让浏览器去 OneID，被拒就直接回站点首页——
+此时本站会话已清，再点登录会重新走授权，不会停在报错 JSON 上。
+
 ### 6. 绑定域名
 
 把 `dji-exam.airmole.cn` 解析到 Makers 项目；`SITE_URL` 必须与之一致，否则回调域名校验会失败。
@@ -130,6 +138,7 @@ https://dji-exam.airmole.cn/api/auth/callback
 | `OIDC_CLIENT_SECRET` | — | 客户端密钥 |
 | `OIDC_CLIENT_AUTH_METHOD` | 空（先 `basic` 再 `post`） | 客户端认证方式。`basic` 走 `Authorization` 头，`post` 把凭据放表单；凭据非 ASCII 或反代改写 header 时用 `post` |
 | `OIDC_SCOPES` | `openid profile` | 申请 scope |
+| `OIDC_LOGOUT_REDIRECT_URI` | 空（回站点首页） | 登出后回跳地址，**必须是 OneID 应用里登记过的那个**，例如 `https://dji-exam.airmole.cn/logout-done` |
 | `SESSION_SECRET` | 回退用 client secret | 会话签名/加密密钥，建议单独配置 |
 | `EXAM_QUESTION_COUNT` | `50` | 抽题数量 |
 | `EXAM_POINTS_PER_QUESTION` | `2` | 每题分值 |
@@ -149,7 +158,7 @@ https://dji-exam.airmole.cn/api/auth/callback
 | --- | --- | --- |
 | GET | `/api/auth/login?returnTo=` | 跳转 OneID 授权 |
 | GET | `/api/auth/callback` | 授权回调，换取用户信息并建会话 |
-| GET | `/api/auth/logout` | 清除会话并跳转 OneID `<issuer>/fclogout`（带 `client_id`、`post_logout_redirect_uri`、`id_token_hint`） |
+| GET | `/api/auth/logout` | 清除会话；OneID 受理回跳时跳转 `<issuer>/fclogout`（带 `client_id`、`post_logout_redirect_uri`、`id_token_hint`），否则直接回首页 |
 | GET | `/api/auth/me` | 当前登录态、是否管理员、考试规则 |
 | GET | `/api/meta` | 站点信息（题库总量、规则、登录态） |
 | GET | `/api/exam/rules` | 考试规则 |
