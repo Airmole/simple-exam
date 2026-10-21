@@ -201,8 +201,8 @@ console.log('\n[8] 登出地址');
     idTokenHint: 'header.payload.sig',
     postLogoutRedirect: 'https://dji-exam.airmole.cn/',
   }));
-  // 兜底端点不能落在 OIDC 应用路径下，否则 OneID 回 invalid_request
-  check('兜底端点为 /authz/fclogout', logout.origin + logout.pathname === 'https://oauth2.account.tencent.com/authz/fclogout', logout.toString());
+  // 回归：PR #14 把端点改成了 /authz/fclogout，OneID 回「404 page not found」
+  check('端点为 issuer 下的 /fclogout', logout.origin + logout.pathname === `${config.oidcIssuer}/fclogout`, logout.toString());
   check('带 client_id（曾经缺失导致 Missing client_id）', logout.searchParams.get('client_id') === config.oidcClientId, logout.toString());
   check('带 post_logout_redirect_uri', logout.searchParams.get('post_logout_redirect_uri') === 'https://dji-exam.airmole.cn/');
   check('带 id_token_hint', logout.searchParams.get('id_token_hint') === 'header.payload.sig');
@@ -218,15 +218,32 @@ console.log('\n[8] 登出地址');
     authorization_endpoint: 'https://id.example.com/authz/oidc/v2/app2/authorize',
     token_endpoint: 'https://id.example.com/authz/oidc/v2/app2/token',
     userinfo_endpoint: 'https://id.example.com/authz/oidc/v2/app2/userinfo',
-    end_session_endpoint: 'https://id.example.com/authz/fclogout',
+    end_session_endpoint: 'https://id.example.com/authz/oidc/v2/app2/fclogout',
   }), { headers: { 'content-type': 'application/json' } });
   try {
     const issuer = 'https://id.example.com/authz/oidc/v2/app2';
     const meta = new URL(await buildAuthorizeUrl(new Request('https://dji-exam.airmole.cn/api/auth/login'), { ...config, oidcIssuer: issuer }, 's', 'c'));
     check('发现文档已就绪', meta.origin === 'https://id.example.com');
     const url = new URL(await buildLogoutUrl({ ...config, oidcIssuer: issuer }, { postLogoutRedirect: 'https://dji-exam.airmole.cn/' }));
-    check('优先使用 end_session_endpoint', url.origin + url.pathname === 'https://id.example.com/authz/fclogout', url.toString());
-    check('切换 issuer 后回落到新地址的兜底', !url.searchParams.get('id_token_hint'));
+    check('优先使用 end_session_endpoint', url.origin + url.pathname === 'https://id.example.com/authz/oidc/v2/app2/fclogout', url.toString());
+    check('切换 issuer 后按新 issuer 重新发现端点', url.origin + url.pathname === 'https://id.example.com/authz/oidc/v2/app2/fclogout', url.toString());
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  // end_session_endpoint 是相对地址/缺字段时不采信，免得拼出非法 URL
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    issuer: 'https://id.example.com/authz/oidc/v2/app3',
+    authorization_endpoint: 'https://id.example.com/authz/oidc/v2/app3/authorize',
+    token_endpoint: 'https://id.example.com/authz/oidc/v2/app3/token',
+    userinfo_endpoint: 'https://id.example.com/authz/oidc/v2/app3/userinfo',
+    end_session_endpoint: '/authz/fclogout',
+  }), { headers: { 'content-type': 'application/json' } });
+  try {
+    const issuer = 'https://id.example.com/authz/oidc/v2/app3';
+    await buildAuthorizeUrl(new Request('https://dji-exam.airmole.cn/api/auth/login'), { ...config, oidcIssuer: issuer }, 's', 'c');
+    const url = new URL(await buildLogoutUrl({ ...config, oidcIssuer: issuer }, {}));
+    check('相对地址的 end_session_endpoint 被忽略', url.origin + url.pathname === `${issuer}/fclogout`, url.toString());
   } finally {
     globalThis.fetch = realFetch;
   }

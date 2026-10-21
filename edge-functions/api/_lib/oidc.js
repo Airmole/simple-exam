@@ -225,28 +225,33 @@ export function decodeIdTokenClaims(idToken) {
   }
 }
 
-// 登出端点兜底（OneID 的 fclogout 挂在 /authz 下，不在 OIDC 应用路径里）：
-// issuer 形如 https://oauth2.account.tencent.com/authz/oidc/v2/<app_id>，取 /oidc 之前那段。
-// 直接 issuer + /fclogout 会打到 OIDC 应用路径下，OneID 只回「Missing client_id」。
+// 登出端点兜底（issuer 形如 https://oauth2.account.tencent.com/authz/oidc/v2/<app_id>）：
+// - 真实可用的 fclogout 在 /authz/oidc/v2/<app_id>/fclogout，即 issuer + /fclogout；
+// - 砍掉 /oidc/ 段拼出的 /authz/fclogout 并不存在，OneID 网关直接回 404 page not found。
+// PR #14 就是错信了这条兜底地址才继续白屏，这里改回 issuer 下的端点。
 function fallbackLogoutEndpoint(issuer) {
-  const base = issuer.replace(/\/+$/, '');
-  const cut = base.indexOf('/oidc/');
-  return `${cut > 0 ? base.slice(0, cut) : base}/fclogout`;
+  return `${issuer.replace(/\/+$/, '')}/fclogout`;
+}
+
+// well-known 的 end_session_endpoint 只认绝对地址；兼容 issuer 少了 /authz/ 这类写法，
+// 拉取失败或字段缺失都回落到 issuer 下的 fclogout。
+async function logoutEndpoint(config) {
+  try {
+    const meta = await discover(config.oidcIssuer);
+    const endpoint = meta && meta.end_session_endpoint;
+    return typeof endpoint === 'string' && /^https?:\/\//i.test(endpoint) ? endpoint : null;
+  } catch {
+    return null;
+  }
 }
 
 // 组装 OneID 登出地址。
-// OneID 的 fclogout 要求三件事一起给：client_id、post_logout_redirect_uri、id_token_hint，
-// 少一个就回 invalid_request 白屏。id_token_hint 拿不到时由调用方改用 POST 表单提交
-// （表单参数不走 URL，避免把 id_token 这种长串塞进 query 被日志/网关截断）。
-export function buildLogoutUrl(config, { idTokenHint, postLogoutRedirect } = {}) {
+// OneID 的 fclogout 只认 GET，且要求三件事一起给：client_id、post_logout_redirect_uri、id_token_hint，
+// 少一个就 invalid_request 白屏（Missing client_id）。
+// 优先级仍是 well-known 的 end_session_endpoint，但只在它是本 issuer 路径下的绝对地址时才采信。
+export async function buildLogoutUrl(config, { idTokenHint, postLogoutRedirect } = {}) {
   if (!config.oidcIssuer) return null;
-  let endpoint = fallbackLogoutEndpoint(config.oidcIssuer);
-  try {
-    const meta = discoverCache?.issuer === config.oidcIssuer ? discoveryCache.value : null;
-    if (meta && meta.end_session_endpoint) endpoint = meta.end_session_endpoint;
-  } catch {
-    // 发现失败不影响登出，用兜底地址
-  }
+  const endpoint = (await logoutEndpoint(config)) || fallbackLogoutEndpoint(config.oidcIssuer);
   const url = new URL(endpoint);
   if (config.oidcClientId) url.searchParams.set('client_id', config.oidcClientId);
   if (postLogoutRedirect) url.searchParams.set('post_logout_redirect_uri', postLogoutRedirect);

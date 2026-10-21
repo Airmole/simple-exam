@@ -256,10 +256,11 @@ console.log('\n[11] 登出与未知接口');
   const c = await sessionCookie(student);
   const r = await call('GET', '/api/auth/logout', { cookie: c });
   check('logout 302', r.status === 302, String(r.status));
-  // 回归：曾经跳到 issuer + /fclogout 且不带 client_id，OneID 回 invalid_request 白屏
+  // 回归：曾经跳到 issuer + /fclogout 且不带 client_id（Missing client_id），
+  // 再被改成不存在的 /authz/fclogout（404 page not found）
   const location = r.headers.get('location') || '';
   const out = new URL(location);
-  check('logout 跳到 OneID 的 /authz/fclogout', out.origin + out.pathname === 'https://oauth2.account.tencent.com/authz/fclogout', location);
+  check('logout 跳到 OneID 的 fclogout', out.origin + out.pathname === `${ENV.OIDC_ISSUER}/fclogout`, location);
   check('logout 带 client_id', out.searchParams.get('client_id') === ENV.OIDC_CLIENT_ID, location);
   check('logout 带回跳地址', out.searchParams.get('post_logout_redirect_uri') === 'https://dji-exam.airmole.cn/', location);
   check('logout 清除会话 cookie', /exam_session=;/.test(String(r.headers.getSetCookie ? r.headers.getSetCookie().join(';') : r.headers.get('set-cookie'))));
