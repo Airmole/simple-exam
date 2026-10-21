@@ -2,7 +2,7 @@
 import { api } from '../api.js';
 import { h, fmtCountdown, fmtTime, toast, draftStore, notice } from '../util.js';
 import { topbar, errorCard } from '../components.js';
-import { closedNotice } from '../site.js';
+import { closedNotice, guestAllowed } from '../site.js';
 
 const OPTION_KEYS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
 
@@ -14,10 +14,15 @@ export async function renderExam({ navigate, setLeaveGuard }) {
     return { element: h('div', { class: 'app' }, [topbar(), errorCard(e)]), title: '加载失败' };
   }
 
+  // 未登录也能考时，「谁」不再等于登录用户，草稿按 sub 或游客身份分开存放
+  const guest = !meta.user && (meta.guest === true || guestAllowed());
+  // 游客第一次进来还没有 gid，先给个本地临时身份，开考后再换成服务端签发的那一个
+  const identity = meta.user ? meta.user.sub : (guest ? (guestStore.id() || guestStore.issue()) : null);
+
   // 考试结束后不再抽取新试卷，直接拦在答题页外面
   const closed = closedNotice();
   const draft = draftStore.load();
-  const hasDraft = !!closed && draft && draft.sub === meta.user?.sub && draft.expiresAt > Date.now();
+  const hasDraft = !!closed && draft && draft.identity === identity && draft.expiresAt > Date.now();
   if (closed && !hasDraft) {
     return {
       element: h('div', { class: 'app' }, [
@@ -34,7 +39,7 @@ export async function renderExam({ navigate, setLeaveGuard }) {
     };
   }
 
-  if (!meta.user) {
+  if (!identity) {
     return {
       element: h('div', { class: 'app' }, [
         topbar(meta),
@@ -50,7 +55,7 @@ export async function renderExam({ navigate, setLeaveGuard }) {
 
   // 恢复本用户未超时的草稿，否则重新抽题
   let paper = draftStore.load();
-  if (paper && paper.sub !== meta.user.sub) paper = null;   // 换人登录，丢弃上一位用户的草稿
+  if (paper && paper.identity !== identity) paper = null;   // 换人登录，丢弃上一位用户的草稿
   if (paper && paper.expiresAt && Date.now() > paper.expiresAt) {
     toast('上次考试已超时，已重新抽题', 'warn');
     paper = null;
@@ -59,9 +64,13 @@ export async function renderExam({ navigate, setLeaveGuard }) {
   if (!paper) {
     draftStore.clear();
     try {
-      const started = await api.startExam();
+      const started = await api.startExam(guest ? { guestId: guestStore.id() } : {});
+      // 服务端签发的游客 id 认下来，后面取卷、交卷都靠它
+      if (started.guestId) guestStore.save(started.guestId);
       paper = {
-        sub: meta.user.sub,
+        identity,
+        guest: !!started.guest,
+        guestId: started.guestId || null,
         questions: started.questions,
         answers: {},
         startedAt: started.startedAt,
@@ -222,12 +231,15 @@ export async function renderExam({ navigate, setLeaveGuard }) {
       startedAt: paper.startedAt,
       questionIds: paper.questions.map((q) => q.id),
     };
+    if (paper.guestId) payload.guestId = paper.guestId;
     questionCard.innerHTML = '';
     questionCard.appendChild(h('div', { class: 'center muted', text: auto ? '考试时间结束，正在自动交卷…' : '正在提交试卷…' }));
 
     try {
       const res = await api.submitExam(payload);
       draftStore.clear();
+      // 游客 id 一次性，交完就作废，下次开考重新领
+      guestStore.clear();
       const resultKey = res.recordId ? `exam_result_${res.recordId}` : 'exam_result_latest';
       sessionStorage.setItem(resultKey, JSON.stringify({
         ...res,
@@ -289,3 +301,23 @@ export async function renderExam({ navigate, setLeaveGuard }) {
     destroy: () => { state.destroyed = true; stopTimers(); },
   };
 }
+
+// 游客身份：服务端签发后存本地，刷新页面还能把试卷取回来。
+// 首访时先用一个本地临时 id 占位（只用于区分草稿），开考后换成服务端签发的 gid。
+const guestStore = {
+  key: 'exam_guest_id_v1',
+  id() {
+    try { return localStorage.getItem(this.key) || ''; } catch { return ''; }
+  },
+  save(id) {
+    try { localStorage.setItem(this.key, id); } catch { /* 隐私模式 */ }
+  },
+  issue() {
+    const id = `local_${Math.random().toString(36).slice(2, 10)}`;
+    this.save(id);
+    return id;
+  },
+  clear() {
+    try { localStorage.removeItem(this.key); } catch { /* noop */ }
+  },
+};

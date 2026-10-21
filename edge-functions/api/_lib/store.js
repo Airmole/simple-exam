@@ -6,6 +6,7 @@
 // exam_record_<recordId>  单次答题记录（含逐题明细）
 // exam_user_<sub>         用户索引（记录其所有 recordId、最高分、最快用时）
 // exam_paper_<sub>        进行中的试卷（含 TTL）
+// exam_gpaper_<gid>       游客进行中的试卷（含 TTL，不落成绩、不进统计）
 // exam_stats              汇总统计（考试人数、次数、合格率等）
 //
 // 排名不额外落库：由 exam_record_ 前缀扫描后在内存中聚合（用户取最高分，同分用时短优先）
@@ -13,6 +14,7 @@
 const RECORD_PREFIX = 'exam_record_';
 const USER_PREFIX = 'exam_user_';
 const PAPER_PREFIX = 'exam_paper_';
+const GUEST_PAPER_PREFIX = 'exam_gpaper_';
 const STATS_KEY = 'exam_stats';
 
 /** 把任意字符串压成只含字母数字下划线的安全片段 */
@@ -29,6 +31,11 @@ export const prefixOf = {
 
 export function paperKey(sub) {
   return `${PAPER_PREFIX}${keySegment(sub)}`;
+}
+
+/** 游客试卷 key：gid 由服务端签发，客户端只带回来取卷 */
+export function guestPaperKey(gid) {
+  return `${GUEST_PAPER_PREFIX}${keySegment(gid)}`;
 }
 
 async function listAllKeys(kv, prefix) {

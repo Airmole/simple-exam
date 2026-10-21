@@ -2,7 +2,7 @@
 import { api, loginUrl } from '../api.js';
 import { h, notice } from '../util.js';
 import { topbar, rulesCard, errorCard } from '../components.js';
-import { closedNotice, cachedSite, rankingEnabled } from '../site.js';
+import { closedNotice, cachedSite, rankingEnabled, guestAllowed } from '../site.js';
 
 export async function renderHome({ navigate }) {
   let meta;
@@ -15,6 +15,8 @@ export async function renderHome({ navigate }) {
   const site = cachedSite() || {};
   const rules = meta.rules;
   const loggedIn = !!meta.user;
+  // 未登录也能答题时，匿名访客不算「没资格考」，只是成绩不留存
+  const guest = !loggedIn && guestAllowed();
   const closed = closedNotice();
   const attemptsLeft = loggedIn ? meta.attemptsLeft : null;
   const outOfAttempts = attemptsLeft === 0;
@@ -28,11 +30,13 @@ export async function renderHome({ navigate }) {
     h('li', { text: '每道题只有一个正确答案，答题过程中可随时在答题卡中跳转检查。' }),
     h('li', { text: '交卷后立即出分，成绩以服务端判分结果为准。' }),
   ];
-  if (rules.maxAttemptsDesc) notes.push(h('li', { text: `考试次数：${rules.maxAttemptsDesc}。` }));
+  if (rules.maxAttemptsDesc && !guest) notes.push(h('li', { text: `考试次数：${rules.maxAttemptsDesc}。` }));
   if (rules.showRanking) notes.push(h('li', { text: '多次考试成绩取最高分参与排名，同分时用时较短者靠前。' }));
+  if (guest) notes.push(h('li', { text: '当前为免登录体验模式：答完立即出分，成绩不会保存，也不计入排名与统计。' }));
 
   const startButton = () => {
     if (closed) return null;
+    if (guest) return h('button', { class: 'btn btn-primary', onClick: () => navigate('#/exam'), text: '直接开始答题' });
     if (!loggedIn) return h('a', { class: 'btn btn-primary', href: loginUrl() }, ['登录并开始答题']);
     if (outOfAttempts) return h('button', { class: 'btn', disabled: true, text: '考试次数已用完' });
     return h('button', { class: 'btn btn-primary', onClick: () => navigate('#/exam'), text: '开始考试' });
@@ -48,6 +52,8 @@ export async function renderHome({ navigate }) {
       closed
         ? h('p', { class: 'muted', text: '本次考试已结束，以下为考试规则留存，供查阅。' })
         : h('p', { class: 'muted', text: '请先阅读考试规则，确认无误后开始答题。考试过程中请勿关闭或刷新页面。' }),
+      // 免登录模式下说清代价：成绩当场看到，但转身就走什么都不剩
+      guest ? h('div', { class: 'notice notice-warn', text: '你当前未登录：答题结束后会立即出分，但成绩不会被保存，也不参与排名与统计。' }) : null,
       rulesCard(rules),
       h('h3', { text: '考试说明' }),
       h('ul', { class: 'muted', style: 'margin:0;padding-left:20px' }, notes),

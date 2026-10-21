@@ -14,6 +14,7 @@ export const DEFAULTS = {
   EXAM_SHOW_ANSWER: 'true',
   EXAM_KEEP_RECORDS: 'true',
   EXAM_DEADLINE: '',
+  EXAM_ALLOW_GUEST: 'false',
 };
 
 const num = (v, fallback) => {
@@ -33,6 +34,9 @@ const bool = (v, fallback) => {
   if (!s) return fallback;
   return !['0', 'false', 'off', 'no'].includes(s);
 };
+
+// 管理后台密码最短长度：太短等于没设，直接按未配置处理
+export const MIN_ADMIN_PASSWORD_LENGTH = 6;
 
 const ORIGIN_PATTERN = /^https?:\/\/[0-9A-Za-z.-]+(:\d+)?(\/.*)?$/;
 
@@ -83,6 +87,13 @@ export function getConfig(env) {
     showAnswer: bool(e.EXAM_SHOW_ANSWER, DEFAULTS.EXAM_SHOW_ANSWER === 'true'),
     // 是否把答题记录写入 KV（关闭后成绩与解析只在交卷那一刻返回）
     keepRecords: bool(e.EXAM_KEEP_RECORDS, DEFAULTS.EXAM_KEEP_RECORDS === 'true'),
+    // 是否允许不登录答题：游客答完即出分，但不落库、不参与统计与排名
+    allowGuest: bool(e.EXAM_ALLOW_GUEST, DEFAULTS.EXAM_ALLOW_GUEST === 'true'),
+    // 管理后台密码：配置后即可用密码登入后台，无需 OneID。
+    // 至少 6 位，太短按未配置处理；ADMIN_PASSWORD_LOGIN=false 可整体关掉密码入口。
+    adminPassword: String(e.ADMIN_PASSWORD || '').trim(),
+    adminPasswordEnabled: String(e.ADMIN_PASSWORD || '').trim().length >= MIN_ADMIN_PASSWORD_LENGTH
+      && bool(e.ADMIN_PASSWORD_LOGIN, true),
     // 会话签名密钥，未配置则回退到客户端密钥
     sessionSecret: e.SESSION_SECRET || e.OIDC_CLIENT_SECRET || 'insecure-dev-secret',
     // 管理后台白名单

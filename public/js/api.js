@@ -23,12 +23,14 @@ export const api = {
   meta: () => request('/meta'),
   me: () => request('/auth/me'),
   rules: () => request('/exam/rules'),
-  startExam: () => request('/exam/start', { method: 'POST', body: {} }),
+  startExam: (payload = {}) => request('/exam/start', { method: 'POST', body: payload }),
   submitExam: (payload) => request('/exam/submit', { method: 'POST', body: payload }),
   ranking: () => request('/ranking'),
   adminStats: () => request('/admin/stats'),
   adminRecords: () => request('/admin/records'),
   adminRecord: (id) => request(`/admin/record?id=${encodeURIComponent(id)}`),
+  adminLogin: (password) => request('/auth/admin-login', { method: 'POST', body: { password } }),
+  adminLogout: () => request('/auth/admin-logout'),
 };
 
 export function loginUrl(returnTo = location.pathname + location.search) {

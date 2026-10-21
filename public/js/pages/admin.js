@@ -1,7 +1,8 @@
 // 管理后台：统计指标 + 答题记录列表 + 记录详情
 import { api } from '../api.js';
-import { h, fmtDateTime, fmtDuration, notice } from '../util.js';
+import { h, fmtDateTime, fmtDuration, notice, toast } from '../util.js';
 import { topbar, errorCard } from '../components.js';
+import { adminPasswordLogin } from '../site.js';
 
 export async function renderAdmin({ navigate }) {
   let meta;
@@ -11,7 +12,8 @@ export async function renderAdmin({ navigate }) {
     return { element: wrap([topbar(), errorCard(e)]), title: '加载失败' };
   }
 
-  if (!meta.user) {
+  // 没配 OneID 也能进后台：密码登录不依赖身份认证，未登录时直接给入口
+  if (!meta.user && !adminPasswordLogin()) {
     return {
       element: wrap([topbar(meta), h('div', { class: 'card' }, [
         h('h2', { text: '需要登录' }),
@@ -22,7 +24,7 @@ export async function renderAdmin({ navigate }) {
     };
   }
 
-  if (!meta.isAdmin) return noPermission(meta);
+  if (!meta.isAdmin) return passwordLoginView(meta, navigate);
 
   let statsRes;
   let recordsRes;
@@ -88,11 +90,68 @@ export async function renderAdmin({ navigate }) {
       h('div', { class: 'btn-row mt' }, [
         h('button', { class: 'btn', text: '刷新数据', onClick: () => navigate('#/admin') }),
         h('button', { class: 'btn', text: '返回首页', onClick: () => navigate('#/') }),
+        // 密码进来的会话得有个出口，不然只能等它自己过期
+        meta.adminVia === 'password'
+          ? h('button', { class: 'btn btn-ghost', text: '退出后台', onClick: logoutAdmin })
+          : null,
       ]),
     ]),
   ];
 
   return { element: wrap(children), title: '管理后台' };
+}
+
+// 密码登录：只拿后台权限，不当作「登录了账号」，所以不进 topbar 的用户区
+function passwordLoginView(meta, navigate) {
+  const input = h('input', {
+    type: 'password',
+    autocomplete: 'current-password',
+    placeholder: '请输入管理密码',
+    style: 'width:100%;max-width:320px;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:15px',
+  });
+  const hint = h('div');
+  const button = h('button', { class: 'btn btn-primary', type: 'submit', text: '进入管理后台' });
+
+  const form = h('form', {
+    onSubmit: async (e) => {
+      e.preventDefault();
+      const password = input.value.trim();
+      if (!password) { toast('请输入管理密码', 'warn'); return; }
+      button.disabled = true;
+      button.textContent = '验证中…';
+      hint.innerHTML = '';
+      try {
+        await api.adminLogin(password);
+        navigate('#/admin');
+        // hash 没变时 navigate 不会重渲染，手动刷一次
+        if (location.hash === '#/admin') window.dispatchEvent(new HashChangeEvent('hashchange'));
+      } catch (err) {
+        hint.appendChild(notice('bad', err.status === 429 ? err.message : `登录失败：${err.message}`));
+        button.disabled = false;
+        button.textContent = '进入管理后台';
+      }
+    },
+  }, [
+    h('div', { class: 'muted', style: 'margin-bottom:8px', text: '请输入管理密码' }),
+    input,
+    h('div', { class: 'btn-row mt' }, [button]),
+    h('div', { class: 'mt' }, [hint]),
+  ]);
+
+  return {
+    element: wrap([
+      topbar(meta),
+      h('div', { class: 'card' }, [
+        h('h1', { text: '管理后台' }),
+        notice('warn', '访问管理后台需要验证身份。'),
+        form,
+        h('div', { class: 'btn-row mt' }, [
+          h('button', { class: 'btn', text: '返回首页', onClick: () => navigate('#/') }),
+        ]),
+      ]),
+    ]),
+    title: '管理后台登录',
+  };
 }
 
 function statCard(k, v, unit) {
@@ -166,6 +225,19 @@ async function showDetail(row) {
     panel.appendChild(notice('bad', `加载详情失败：${e.message}`));
     panel.appendChild(h('div', { class: 'btn-row mt' }, [h('button', { class: 'btn', text: '关闭', onClick: () => overlay.remove() })]));
   }
+}
+
+async function logoutAdmin() {
+  try {
+    await api.adminLogout();
+  } catch (e) {
+    toast(e.message || '退出失败', 'bad');
+    return;
+  }
+  toast('已退出管理后台', 'ok');
+  // hash 已经是 #/ 时不会触发 hashchange，手动重渲染一次
+  if (location.hash === '#/' || !location.hash) window.dispatchEvent(new HashChangeEvent('hashchange'));
+  else location.hash = '#/';
 }
 
 function miniStat(k, v) {

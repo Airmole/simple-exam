@@ -6,7 +6,8 @@
 - 后端：EdgeOne **Edge Functions**（`edge-functions/`，Edge Runtime）
 - 存储：EdgeOne **KV 存储**（成绩、排名、统计）
 - 题库：一个 JSON 文件，改完即用
-- 登录：可选接入腾讯统一身份认证 OneID（OIDC 授权码 + PKCE）
+- 登录：可选接入腾讯统一身份认证 OneID（OIDC 授权码 + PKCE），也可以完全不登录直接答题
+- 后台：密码登录或 OneID 白名单，两种方式可并存
 
 ## 一键部署
 
@@ -29,7 +30,8 @@
 | 判分 | 服务端判分，正确答案不下发前端；交卷后立即出分 |
 | 成绩 | 分数、是否合格、用时、逐题作答；可按开关决定是否公开正确答案 |
 | 排名 | 同一用户取最高分，同分用时短者靠前；可整体关闭 |
-| 管理后台 | 白名单用户可看考试人数/次数/合格率/平均分/最高最低分，以及每条答题记录详情 |
+| 免登录答题 | 一个开关决定游客能不能直接考；答完立即出分，但不落库、不进统计、不参与排名 |
+| 管理后台 | OneID 白名单或后台密码均可进入，可看考试人数/次数/合格率/平均分/最高最低分，以及每条答题记录详情 |
 | 品牌 | 站点名、Logo 文字、主题色都能用环境变量改，不用改代码 |
 
 ## 目录结构
@@ -203,6 +205,7 @@ SESSION_SECRET=<openssl rand -hex 32>
 | `EXAM_SHOW_RANKING` | `true` | 是否公开成绩排名；`false` 时隐藏入口且 `/api/ranking` 返回 403 |
 | `EXAM_SHOW_ANSWER` | `true` | 交卷后是否展示正确答案与逐题对错；`false` 时只给分数和你的作答（管理端详情同样裁剪） |
 | `EXAM_KEEP_RECORDS` | `true` | 是否把答题记录写入 KV；`false` 时不落库、不参与排名，成绩只在交卷响应里返回 |
+| `EXAM_ALLOW_GUEST` | `false` | 是否允许不登录答题；见下方「免登录答题」 |
 
 开关取值：`true`/`1`/`on`/`yes` 为开，`false`/`0`/`off`/`no` 为关，留空取默认。
 
@@ -220,7 +223,45 @@ SESSION_SECRET=<openssl rand -hex 32>
 | `OIDC_LOGOUT_REDIRECT_URI` | 空（回站点首页） | 登出后回跳地址，必须是 OneID 里登记过的那个 |
 | `SESSION_SECRET` | 回退用 client secret | 会话签名/加密密钥，建议单独配置 |
 | `ADMIN_USERS` | 空 | 管理后台白名单，逗号分隔，匹配 `preferred_username`/`email`/`mobile`/`sub`（忽略大小写） |
+| `ADMIN_PASSWORD` | 空 | 管理后台密码，至少 6 位；配置后即可用密码进后台，不依赖 OneID |
+| `ADMIN_PASSWORD_LOGIN` | `true` | 密码登录总开关；设为 `false` 时只认 OneID 白名单 |
 | `KV_BINDING` | `EXAM_KV` | KV 绑定的运行时变量名 |
+
+## 免登录答题
+
+默认要登录才能考。把 `EXAM_ALLOW_GUEST` 打开（配合不接 OneID）：
+
+```
+EXAM_ALLOW_GUEST=true
+```
+
+未登录的访客在首页直接看到「直接开始答题」，答完当场出分，规则是：
+
+- 成绩只在交卷响应里返回，浏览器存在 `sessionStorage`，**刷新即失**，服务端不写任何记录；
+- 不写 `exam_record_` / `exam_user_` / `exam_stats`，因此**不进统计、不进排名**；
+- 游客身份由服务端签发的 `guestId` 代表（存 `localStorage`），试卷落在 `exam_gpaper_<guestId>` 并带 TTL；
+- 没有试卷凭据就不能交卷（防止绕过抽题直接刷分），且同一 `guestId` 交完即废，不能重复提交；
+- 游客没有稳定身份，`EXAM_MAX_ATTEMPTS` 对它不生效，只受 `EXAM_DEADLINE` 约束。
+
+使用上的取舍：打开后任何人都能拿到分数与逐题解析（`EXAM_SHOW_ANSWER` 仍可关掉答案），
+适合练习、自测、活动预热；如果是计分考试，保持关闭，或把 `EXAM_SHOW_RANKING`、`EXAM_SHOW_ANSWER` 一起收紧。
+
+## 管理后台的两种进入方式
+
+**方式一：后台密码**（不需要 OneID）
+
+```
+ADMIN_PASSWORD=<openssl rand -base64 18>
+```
+
+- 访问 `#/admin` 会直接给密码表单，POST 到 `/api/auth/admin-login`；
+- 通过后下发独立的 `exam_admin` Cookie（HttpOnly、SameSite=Lax、AES-GCM 加密 + HMAC 签名，4 小时过期），
+  并**不影响** `exam_session` 的登录态：后台登出不会把人踢出考试系统，反之亦然；
+- 密码会话只给后台用，不算「已登录用户」，不能开考，`/api/meta` 里会标 `adminVia: "password"`；
+- 同一来源 IP 连错 5 次锁 10 分钟（`429 ADMIN_LOGIN_LOCKED`），锁按 IP 隔离；
+- 密码少于 6 位按未配置处理；`ADMIN_PASSWORD_LOGIN=false` 可随时关掉密码入口。
+
+**方式二：OneID 白名单**（`ADMIN_USERS`，见上表）。两种方式可以同时开，任意一条通过都算管理员。
 
 ## 接口
 
@@ -229,20 +270,22 @@ SESSION_SECRET=<openssl rand -hex 32>
 | GET | `/api/site` | 站点品牌配置、排名开关、截止状态（不依赖 KV） |
 | GET | `/api/meta` | 站点信息、题库总量、考试规则、登录态、剩余次数 |
 | GET | `/api/exam/rules` | 考试规则 |
-| POST | `/api/exam/start` | 抽题开考，返回题目（不含答案）与起止时间 |
-| GET | `/api/exam/questions` | 取整卷或单题（`?index=N`） |
-| POST | `/api/exam/submit` | 交卷判分；`answers` 为 `{ 题号: 选项字母 }` |
+| POST | `/api/exam/start` | 抽题开考，返回题目（不含答案）与起止时间；游客返回 `guestId` |
+| GET | `/api/exam/questions` | 取整卷或单题（`?index=N`）；游客需带 `?guestId=` |
+| POST | `/api/exam/submit` | 交卷判分；`answers` 为 `{ 题号: 选项字母 }`，游客需带 `guestId` |
 | GET | `/api/ranking` | 成绩排名（`EXAM_SHOW_RANKING=false` 时 403） |
 | GET | `/api/auth/login?returnTo=` | 跳转 OneID 授权 |
 | GET | `/api/auth/callback` | 授权回调，换取用户信息并建会话 |
 | GET | `/api/auth/logout` | 清除会话；OneID 受理回跳时跳 `fclogout`，否则直接回首页 |
 | GET | `/api/auth/me` | 当前登录态、是否管理员、考试规则、剩余次数 |
+| POST | `/api/auth/admin-login` | 用 `ADMIN_PASSWORD` 换后台会话，body `{ "password": "..." }` |
+| GET | `/api/auth/admin-logout` | 清除后台密码会话 |
 | GET | `/api/admin/stats` | 统计指标（仅管理员） |
 | GET | `/api/admin/records` | 答题记录列表（仅管理员） |
 | GET | `/api/admin/record?id=` | 单条记录详情（仅管理员） |
 
-错误码约定：`401` 未登录、`403` 无权限/已截止/次数用尽/排名关闭、`409` 无进行中的考试或已超时、
-`503 KV_BINDING_MISSING` 缺 KV 绑定。
+错误码约定：`401` 未登录/密码错误、`403` 无权限/已截止/次数用尽/排名关闭/密码登录未开启、
+`409` 无进行中的考试或已超时、`429` 后台密码试错被锁、`503 KV_BINDING_MISSING` 缺 KV 绑定。
 
 ## 数据模型（KV）
 
@@ -251,6 +294,7 @@ SESSION_SECRET=<openssl rand -hex 32>
 | `exam_record_<id>` | 单次答题记录，含逐题明细（题目、正确答案、用户答案） |
 | `exam_user_<sub>` | 用户索引：全部记录 ID、最高分、最快用时、考试次数 |
 | `exam_paper_<sub>` | 进行中的试卷（含 TTL，用于服务端判分） |
+| `exam_gpaper_<gid>` | 游客进行中的试卷（含 TTL，交卷即删，不产生成绩记录） |
 | `exam_stats` | 汇总统计：人数、次数、合格数、分数和、最快/最慢用时 |
 
 EdgeOne KV 的 key 只允许**数字、字母、下划线**（≤ 512B），所以分隔符用 `_`，
@@ -286,6 +330,16 @@ SITE_NAME="内部认证考试" BRAND_COLOR="#e11d48" EXAM_MAX_ATTEMPTS=2 \
 EXAM_QUESTION_COUNT=5 EXAM_POINTS_PER_QUESTION=20 node test/dev-server.mjs
 ```
 
+不登录答题与密码后台也能本地直接试，不需要配 OneID：
+
+```bash
+# 游客答题 + 后台密码登录
+EXAM_ALLOW_GUEST=true ADMIN_PASSWORD=dev-admin-pwd node test/dev-server.mjs
+```
+
+打开 `#/` 直接答题（刷新成绩页会消失，这是设计如此）；`#/admin` 输 `dev-admin-pwd` 进后台，
+页面底部有「退出后台」清掉密码会话。
+
 本地登录：访问 `/api/auth/login`，mock 提供方默认签发「李四」；
 把跳转到的 `/mock-oidc/authorize` 地址末尾加上 `&user=code_admin` 即以管理员身份登录。
 
@@ -299,4 +353,7 @@ EXAM_QUESTION_COUNT=5 EXAM_POINTS_PER_QUESTION=20 node test/dev-server.mjs
 - 截止时间与次数限制在服务端强制校验，前端隐藏入口只是体验优化。
 - 会话 Cookie 为 HttpOnly + SameSite=Lax，载荷经 AES-GCM 加密并用 HMAC-SHA256 签名。
 - OIDC 使用授权码 + PKCE（S256）与 state 校验，防重放与 CSRF。
-- 管理后台在服务端做白名单校验，前端仅控制入口显示。
+- 管理后台在服务端做白名单与密码校验，前端仅控制入口显示；密码以定长比较（先 SHA-256 再逐字节比），
+  同一 IP 连续试错会锁定，响应里不回显任何配置。
+- 游客答题不需要身份，因此**服务端不落任何记录**：没有 `recordId`、不进 `exam_stats`、不进排名；
+  试卷凭据（`guestId`）由服务端签发，交卷后立即作废。

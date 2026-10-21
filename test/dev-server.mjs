@@ -39,6 +39,10 @@ const ENV = {
   EXAM_SHOW_RANKING: process.env.EXAM_SHOW_RANKING || 'true',
   EXAM_SHOW_ANSWER: process.env.EXAM_SHOW_ANSWER || 'true',
   EXAM_KEEP_RECORDS: process.env.EXAM_KEEP_RECORDS || 'true',
+  EXAM_ALLOW_GUEST: process.env.EXAM_ALLOW_GUEST || 'false',
+  // 本地想试密码登录就带上 ADMIN_PASSWORD，不配就等于没开
+  ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || '',
+  ADMIN_PASSWORD_LOGIN: process.env.ADMIN_PASSWORD_LOGIN || 'true',
 };
 
 const MIME = {

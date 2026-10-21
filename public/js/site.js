@@ -85,6 +85,18 @@ export function closedNotice() {
   return `本次考试已于 ${deadlineText()} 截止，不再开放新的考试，感谢参与。`;
 }
 
+/** 是否允许不登录答题 */
+export function guestAllowed() {
+  const site = cachedSite();
+  return !!site && site.allowGuest === true;
+}
+
+/** 管理后台是否支持密码登录 */
+export function adminPasswordLogin() {
+  const site = cachedSite();
+  return !!site && site.adminPasswordLogin === true;
+}
+
 /** 是否展示成绩排名 */
 export function rankingEnabled() {
   const site = cachedSite();

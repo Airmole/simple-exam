@@ -1,10 +1,11 @@
 // /api/* 路由分发
 import { getConfig, getKV } from './config.js';
 import { fail, noContent, ok, readJSON, withCookies } from './http.js';
-import { cookies, createFlow, createSession, exchangeCode, fetchUserInfo, isAdmin, normalizeUser, readFlow, readSession, decodeIdTokenClaims, buildLogoutUrl, logoutAccepted } from './oidc.js';
+import { ADMIN_SESSION_SECONDS, cookies, createAdminSession, createFlow, createSession, exchangeCode, fetchUserInfo, isAdmin, normalizeUser, readAdminSession, readFlow, readSession, decodeIdTokenClaims, buildLogoutUrl, logoutAccepted, verifyAdminPassword } from './oidc.js';
+import { randomString } from './crypto.js';
 import { drawQuestions, getBankSize } from './questions.js';
 import { gradeSubmission } from './scoring.js';
-import { buildRanking, countAttempts, getRecord, getStats, listRecords, maskDetails, paperKey, saveRecord } from './store.js';
+import { buildRanking, countAttempts, getRecord, getStats, guestPaperKey, listRecords, maskDetails, paperKey, saveRecord } from './store.js';
 
 function segments(request) {
   const { pathname } = new URL(request.url);
@@ -47,16 +48,23 @@ export async function handleApi(context) {
     if (path === 'auth/callback') return await handleCallback(request, config);
     if (path === 'auth/logout') return await handleLogout(request, config);
     if (path === 'auth/me') return await handleMe(request, config, kv);
+    // 后台密码登录：不依赖 OneID，配置了 ADMIN_PASSWORD 就能用
+    if (path === 'auth/admin-login' && method === 'POST') return await handleAdminLogin(request, config);
+    if (path === 'auth/admin-login' && method === 'GET') return fail('请用 POST 提交管理密码', 405);
+    if (path === 'auth/admin-logout') return await handleAdminLogout(request, config);
 
     // ---- 考试规则 ----
     if (path === 'exam/rules') return ok({ rules: await publicRules(config) });
 
     const session = await readSession(request, config.sessionSecret);
-    const admin = { session, isAdmin: isAdmin(session, config) };
+    const admin = await adminState(request, config, session);
 
     // ---- 考试 ----
-    if (path === 'exam/start' && method === 'POST') return await handleExamStart(config, kv, session);
-    if (path === 'exam/questions' && method === 'GET') return await handleExamQuestions(config, kv, session, new URL(request.url).searchParams);
+    // 游客（不登录）答题：只在 EXAM_ALLOW_GUEST 打开时放行，试卷按服务端签发的 gid 存取
+    if (path === 'exam/start' && method === 'POST') return await handleExamStart(request, config, kv, session);
+    if (path === 'exam/questions' && method === 'GET') {
+      return await handleExamQuestions(config, kv, session, new URL(request.url).searchParams);
+    }
     if (path === 'exam/submit' && method === 'POST') return await handleExamSubmit(request, config, kv, session);
 
     // ---- 排名 ----
@@ -92,6 +100,8 @@ async function publicRules(config) {
     maxAttemptsDesc: config.maxAttempts > 0 ? `每人最多 ${config.maxAttempts} 次` : '不限次数',
     showRanking: config.showRanking,
     showAnswer: config.showAnswer,
+    // 游客能不能直接开考（不登录、不落库、不进排名）
+    allowGuest: config.allowGuest,
   };
 }
 
@@ -102,6 +112,10 @@ function siteInfo(config) {
     logo: config.siteLogo,
     brandColor: config.brandColor,
     showRanking: config.showRanking,
+    // 不登录也能答题；考生不需要登录入口，顶部也就不再显示「登录」
+    allowGuest: config.allowGuest,
+    // 后台是否可用密码登录（前端据此渲染密码表单）
+    adminPasswordLogin: config.adminPasswordEnabled,
     deadline: config.deadline,
     deadlineAt: config.deadlineAt,
     closed: config.deadlineAt != null && Date.now() >= config.deadlineAt,
@@ -116,7 +130,12 @@ async function metaInfo(config, session, admin, kv) {
     bankSize: await getBankSize(),
     rules: await publicRules(config),
     user: session ? { name: session.name, username: session.username, sub: session.sub } : null,
+    // 允许游客答题时，未登录也不再是「需要登录」的状态
+    guest: !session && config.allowGuest,
+    // 只认服务端算出来的管理员身份，前端仅用来决定入口显示
     isAdmin: admin.isAdmin,
+    // 密码登录的后台会话没有 OneID 身份，单独给个名字
+    adminVia: admin.via,
     // 已考次数与剩余次数，用于前端在开考前就拦住超次数的用户
     attempts,
     attemptsLeft: config.maxAttempts > 0 ? Math.max(0, config.maxAttempts - attempts) : null,
@@ -197,11 +216,13 @@ async function handleLogout(request, config) {
 
 async function handleMe(request, config, kv) {
   const session = await readSession(request, config.sessionSecret);
+  const admin = await adminState(request, config, session);
   const attempts = session && config.maxAttempts > 0 ? await countAttempts(kv, session.sub) : 0;
   return ok({
     authenticated: !!session,
     user: session ? { name: session.name, username: session.username, sub: session.sub } : null,
-    isAdmin: isAdmin(session, config),
+    guest: !session && config.allowGuest,
+    isAdmin: admin.isAdmin,
     rules: await publicRules(config),
     site: siteInfo(config),
     attempts,
@@ -219,12 +240,28 @@ function examBlocked(config) {
   return null;
 }
 
-async function handleExamStart(config, kv, session) {
-  if (!session) return fail('请先登录', 401);
+/**
+ * 谁在考试：登录用户用 sub 认人，游客用服务端签发的 gid。
+ * owner 只用来拼试卷 key，guest 决定「不落库、不排行、不记次数」。
+ */
+function examOwner(session, config, guestId) {
+  if (session) return { owner: session.sub, guest: false };
+  if (!config.allowGuest) return null;
+  return { owner: guestId || '', guest: true };
+}
+
+async function handleExamStart(request, config, kv, session) {
+  // 游客首次开考由服务端发 gid，之后随请求带回来（前端存 localStorage）
+  const body = await readJSON(request);
+  const who = examOwner(session, config, typeof body.guestId === 'string' ? body.guestId.trim() : '');
+  if (!who) return fail('请先登录', 401);
+  if (who.guest && !who.owner) who.owner = randomString(12);
+
   const blocked = examBlocked(config);
   if (blocked) return blocked;
 
-  if (config.maxAttempts > 0 && await countAttempts(kv, session.sub) >= config.maxAttempts) {
+  // 游客没有稳定身份，次数限制无从统计，按不限处理
+  if (!who.guest && config.maxAttempts > 0 && await countAttempts(kv, session.sub) >= config.maxAttempts) {
     return fail(`每人最多参加 ${config.maxAttempts} 次考试，你已达到上限`, 403, { code: 'ATTEMPTS_EXCEEDED' });
   }
 
@@ -232,16 +269,21 @@ async function handleExamStart(config, kv, session) {
   const startedAt = Date.now();
   const rules = await publicRules(config);
   const paper = {
-    sub: session.sub,
-    name: session.name,
+    sub: session ? session.sub : null,
+    name: session ? session.name : null,
+    guest: who.guest,
     questions,
     startedAt,
     expiresAt: startedAt + config.durationMinutes * 60 * 1000,
     rules,
   };
-  await kv.put(paperKey(session.sub), JSON.stringify(paper), { expirationTtl: config.durationMinutes * 60 + 3600 });
+  const key = who.guest ? guestPaperKey(who.owner) : paperKey(who.owner);
+  await kv.put(key, JSON.stringify(paper), { expirationTtl: config.durationMinutes * 60 + 3600 });
   return ok({
-    paperId: paperKey(session.sub),
+    paperId: key,
+    guest: who.guest,
+    // 游客下次交卷/取卷要把 gid 带回来，登录用户不需要
+    guestId: who.guest ? who.owner : null,
     startedAt: paper.startedAt,
     expiresAt: paper.expiresAt,
     durationSeconds: config.durationMinutes * 60,
@@ -252,8 +294,10 @@ async function handleExamStart(config, kv, session) {
 }
 
 async function handleExamQuestions(config, kv, session, params) {
-  if (!session) return fail('请先登录', 401);
-  const raw = await kv.get(paperKey(session.sub), { type: 'json' });
+  const who = examOwner(session, config, params.get('guestId') || '');
+  if (!who) return fail('请先登录', 401);
+  if (who.guest && !who.owner) return fail('请先开始考试', 409);
+  const raw = await kv.get(who.guest ? guestPaperKey(who.owner) : paperKey(who.owner), { type: 'json' });
   if (!raw) return fail('未找到进行中的考试，请重新开始', 409);
 
   // 只返回当前题目对应的题号，客户端可用 ?index=N 逐题拉取；不传则返回整卷
@@ -279,11 +323,13 @@ async function handleExamQuestions(config, kv, session, params) {
 }
 
 async function handleExamSubmit(request, config, kv, session) {
-  if (!session) return fail('请先登录', 401);
   const body = await readJSON(request);
-  const answers = body.answers && typeof body.answers === 'object' ? body.answers : {};
+  const who = examOwner(session, config, typeof body.guestId === 'string' ? body.guestId.trim() : '');
+  if (!who) return fail('请先登录', 401);
 
-  const raw = await kv.get(paperKey(session.sub), { type: 'json' });
+  const answers = body.answers && typeof body.answers === 'object' ? body.answers : {};
+  const key = who.guest && who.owner ? guestPaperKey(who.owner) : (who.guest ? null : paperKey(who.owner));
+  const raw = key ? await kv.get(key, { type: 'json' }) : null;
   let questions = raw && Array.isArray(raw.questions) ? raw.questions : null;
 
   // 用时以服务端记录的开始时间为准；试卷缺失时用客户端回传值兜底，
@@ -293,6 +339,8 @@ async function handleExamSubmit(request, config, kv, session) {
   if (!(startedAt > 0) || startedAt > now) startedAt = now;
 
   if (!questions) {
+    // 游客每一份试卷都必须有服务端记录，否则不认这次作答（防止无限制刷分）
+    if (who.guest) return fail('未找到进行中的考试，请重新开始', 409);
     // 试卷丢失（KV 过期/跨节点延迟）时，用客户端回传的题号还原，判分仍以服务端题库为准
     const ids = Array.isArray(body.questionIds) ? body.questionIds.map(Number).filter(Number.isInteger) : [];
     questions = ids.map((id) => ({ id }));
@@ -302,7 +350,7 @@ async function handleExamSubmit(request, config, kv, session) {
   // 超时交卷只收「自动交卷」这一次：前端到点会自己提交，这里给 90 秒的传输余量
   const deadline = (raw && raw.expiresAt ? raw.expiresAt : startedAt + config.durationMinutes * 60 * 1000) + 90 * 1000;
   if (now > deadline) {
-    await kv.delete(paperKey(session.sub));
+    if (key) await kv.delete(key);
     return fail('考试已超时，本次作答未记录，请重新开始', 409, { code: 'EXAM_TIMEOUT' });
   }
 
@@ -321,6 +369,8 @@ async function handleExamSubmit(request, config, kv, session) {
     isCorrect: config.showAnswer ? d.isCorrect : null,
   }));
 
+  // 游客与「不留存记录」走同一条路：成绩只出现在这次交卷响应里，之后谁也翻不回来
+  const persist = !who.guest && config.keepRecords;
   const result = {
     score: graded.score,
     correctCount: graded.correctCount,
@@ -333,11 +383,14 @@ async function handleExamSubmit(request, config, kv, session) {
     durationMs,
     showAnswer: config.showAnswer,
     showRanking: config.showRanking,
+    // 游客成绩不进排名、也不占次数，前端据此隐藏相关入口
+    guest: who.guest,
+    persisted: persist,
     details,
     recordId: null,
   };
 
-  if (config.keepRecords) {
+  if (persist) {
     const record = await saveRecord(kv, {
       sub: session.sub,
       name: session.name,
@@ -356,16 +409,86 @@ async function handleExamSubmit(request, config, kv, session) {
   }
 
   // 交卷后清掉进行中的试卷，防止重复提交
-  await kv.delete(paperKey(session.sub));
+  if (key) await kv.delete(key);
   return ok(result);
 }
 
 /* ---------------- 管理后台 ---------------- */
 
+// 同一 IP 连续试错就锁一会儿，挡住拿字典撞密码的
+const LOGIN_FAIL_LIMIT = 5;
+const LOGIN_LOCK_MS = 10 * 60 * 1000;
+const loginFails = new Map();
+
+function clientIp(request) {
+  const h = request.headers;
+  return (h.get('cf-connecting-ip') || h.get('x-forwarded-for') || h.get('x-real-ip') || '')
+    .split(',')[0]
+    .trim() || 'unknown';
+}
+
+function loginLocked(ip, now) {
+  const rec = loginFails.get(ip);
+  if (!rec) return 0;
+  if (rec.lockedUntil && rec.lockedUntil > now) return Math.ceil((rec.lockedUntil - now) / 1000);
+  if (rec.lockedUntil && rec.lockedUntil <= now) loginFails.delete(ip);
+  return 0;
+}
+
+function recordLoginFailure(ip, now) {
+  const rec = loginFails.get(ip) || { count: 0, lockedUntil: 0 };
+  rec.count += 1;
+  if (rec.count >= LOGIN_FAIL_LIMIT) rec.lockedUntil = now + LOGIN_LOCK_MS;
+  loginFails.set(ip, rec);
+}
+
+async function handleAdminLogin(request, config) {
+  if (!config.adminPasswordEnabled) {
+    return fail('未开启密码登录', 403, { code: 'ADMIN_PASSWORD_DISABLED' });
+  }
+  const ip = clientIp(request);
+  const now = Date.now();
+  const wait = loginLocked(ip, now);
+  if (wait > 0) return fail(`密码错误次数过多，请 ${Math.ceil(wait / 60)} 分钟后再试`, 429, { code: 'ADMIN_LOGIN_LOCKED', retryAfter: wait });
+
+  const body = await readJSON(request);
+  const password = typeof body.password === 'string' ? body.password : '';
+  if (!password) return fail('请输入管理密码', 400);
+
+  if (!(await verifyAdminPassword(password, config.adminPassword))) {
+    recordLoginFailure(ip, now);
+    return fail('管理密码不正确', 401, { code: 'ADMIN_PASSWORD_INVALID' });
+  }
+  loginFails.delete(ip);
+
+  const token = await createAdminSession(config.sessionSecret);
+  return withCookies(
+    ok({ authenticated: true, isAdmin: true, expiresIn: ADMIN_SESSION_SECONDS }),
+    cookies.setAdmin(request, token),
+  );
+}
+
+async function handleAdminLogout(request) {
+  return withCookies(ok({ authenticated: false }), cookies.clearAdmin(request));
+}
+
+/**
+ * 当前的后台身份：OneID 白名单，或密码登录的后台会话，二者取其一。
+ * 密码会话只给后台用，不代表「已登录的用户」——它没有 sub，也不该能答题。
+ */
+async function adminState(request, config, session) {
+  if (isAdmin(session, config)) return { session, isAdmin: true, via: 'oidc' };
+  if (config.adminPasswordEnabled && await readAdminSession(request, config.sessionSecret)) {
+    return { session, isAdmin: true, via: 'password' };
+  }
+  return { session, isAdmin: false, via: null };
+}
+
 function requireAdmin(admin) {
+  if (admin.isAdmin) return null;
+  // 密码会话过期时 session 也可能为空，统一按未登录处理
   if (!admin.session) return fail('请先登录', 401);
-  if (!admin.isAdmin) return fail('无权访问管理后台', 403);
-  return null;
+  return fail('无权访问管理后台', 403);
 }
 
 async function handleAdminStats(kv, admin) {

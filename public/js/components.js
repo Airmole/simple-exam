@@ -11,7 +11,8 @@ export function topbar(meta = {}) {
   if (user) {
     actions.push(h('span', { class: 'muted' }, [user.name]));
     actions.push(h('a', { href: '/api/auth/logout', text: '退出登录' }));
-  } else {
+  } else if (!site.allowGuest) {
+    // 免登录答题时不显示「登录」，免得把人引到走不通的 OneID 上
     actions.push(h('a', { href: '/api/auth/login', text: '登录' }));
   }
   return h('div', { class: 'topbar' }, [
