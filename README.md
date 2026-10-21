@@ -22,10 +22,15 @@
 ## 项目截图
 
 ![首页界面](./screenshot/0.png)
+
 ![答题界面](./screenshot/1.png)
+
 ![答题结果](./screenshot/2.png)
+
 ![成绩排名](./screenshot/3.png)
+
 ![管理后台](./screenshot/4.png)
+
 ![答题详情](./screenshot/5.png)
 
 ## 功能一览
