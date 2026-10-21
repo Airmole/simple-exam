@@ -225,19 +225,32 @@ export function decodeIdTokenClaims(idToken) {
   }
 }
 
-export async function buildLogoutUrl(config, idTokenHint, postLogoutRedirect) {
+// 登出端点兜底（OneID 的 fclogout 挂在 /authz 下，不在 OIDC 应用路径里）：
+// issuer 形如 https://oauth2.account.tencent.com/authz/oidc/v2/<app_id>，取 /oidc 之前那段。
+// 直接 issuer + /fclogout 会打到 OIDC 应用路径下，OneID 只回「Missing client_id」。
+function fallbackLogoutEndpoint(issuer) {
+  const base = issuer.replace(/\/+$/, '');
+  const cut = base.indexOf('/oidc/');
+  return `${cut > 0 ? base.slice(0, cut) : base}/fclogout`;
+}
+
+// 组装 OneID 登出地址。
+// OneID 的 fclogout 要求三件事一起给：client_id、post_logout_redirect_uri、id_token_hint，
+// 少一个就回 invalid_request 白屏。id_token_hint 拿不到时由调用方改用 POST 表单提交
+// （表单参数不走 URL，避免把 id_token 这种长串塞进 query 被日志/网关截断）。
+export function buildLogoutUrl(config, { idTokenHint, postLogoutRedirect } = {}) {
   if (!config.oidcIssuer) return null;
-  // 优先使用 well-known 的 end_session_endpoint，取不到时退回 issuer + /fclogout
-  let endpoint = `${config.oidcIssuer.replace(/\/+$/, '')}/fclogout`;
+  let endpoint = fallbackLogoutEndpoint(config.oidcIssuer);
   try {
-    const meta = await discover(config.oidcIssuer);
-    if (meta.end_session_endpoint) endpoint = meta.end_session_endpoint;
+    const meta = discoverCache?.issuer === config.oidcIssuer ? discoveryCache.value : null;
+    if (meta && meta.end_session_endpoint) endpoint = meta.end_session_endpoint;
   } catch {
     // 发现失败不影响登出，用兜底地址
   }
   const url = new URL(endpoint);
-  if (idTokenHint) url.searchParams.set('id_token_hint', idTokenHint);
+  if (config.oidcClientId) url.searchParams.set('client_id', config.oidcClientId);
   if (postLogoutRedirect) url.searchParams.set('post_logout_redirect_uri', postLogoutRedirect);
+  if (idTokenHint) url.searchParams.set('id_token_hint', idTokenHint);
   return url.toString();
 }
 

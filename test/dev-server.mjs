@@ -147,7 +147,20 @@ async function handleMockOidc(req, res) {
     return json(res, user);
   }
   if (url.pathname === '/mock-oidc/fclogout') {
-    res.writeHead(302, { location: url.searchParams.get('post_logout_redirect_uri') || '/' });
+    // 照真 OneID 的脾气：缺 client_id 一律 invalid_request（线上就是这么白屏的）
+    let params = url.searchParams;
+    if (req.method === 'POST') {
+      let body = '';
+      for await (const chunk of req) body += chunk;
+      params = new URLSearchParams(body);
+    }
+    if (!params.get('client_id')) {
+      return json(res, {
+        error: 'invalid_request',
+        error_description: 'Missing client_id',
+      }, 400);
+    }
+    res.writeHead(302, { location: params.get('post_logout_redirect_uri') || '/' });
     return res.end();
   }
   res.writeHead(404);
