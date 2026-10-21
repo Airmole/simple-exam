@@ -1,11 +1,19 @@
 // 运行时配置：全部来自环境变量（EdgeOne Makers 控制台配置，或用 .env 本地调试）
 // 未显式配置的项使用默认值。
 
-const DEFAULTS = {
-  EXAM_QUESTION_COUNT: '50',
-  EXAM_POINTS_PER_QUESTION: '2',
-  EXAM_PASS_SCORE: '80',
-  EXAM_DURATION_MINUTES: '60',
+export const DEFAULTS = {
+  SITE_NAME: '通用单选题考试系统',
+  SITE_LOGO: 'Q',
+  BRAND_COLOR: '#0f5fff',
+  EXAM_QUESTION_COUNT: '10',
+  EXAM_POINTS_PER_QUESTION: '10',
+  EXAM_PASS_SCORE: '60',
+  EXAM_DURATION_MINUTES: '30',
+  EXAM_MAX_ATTEMPTS: '0',
+  EXAM_SHOW_RANKING: 'true',
+  EXAM_SHOW_ANSWER: 'true',
+  EXAM_KEEP_RECORDS: 'true',
+  EXAM_DEADLINE: '',
 };
 
 const num = (v, fallback) => {
@@ -13,7 +21,22 @@ const num = (v, fallback) => {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 };
 
-// 管理后台白名单：支持 @OneID 用户名（preferred_username）、邮箱、手机号或 sub，逗号分隔
+// 允许为 0 的计数（如「不限次数」用 0 表示）
+const nonNegative = (v, fallback) => {
+  if (v === undefined || v === null || String(v).trim() === '') return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+};
+
+const bool = (v, fallback) => {
+  const s = String(v ?? '').trim().toLowerCase();
+  if (!s) return fallback;
+  return !['0', 'false', 'off', 'no'].includes(s);
+};
+
+const ORIGIN_PATTERN = /^https?:\/\/[0-9A-Za-z.-]+(:\d+)?(\/.*)?$/;
+
+// 管理后台白名单：支持 OneID 用户名（preferred_username）、邮箱、手机号或 sub，逗号分隔
 const parseAdminList = (raw) =>
   String(raw || '')
     .split(',')
@@ -24,9 +47,16 @@ export function getConfig(env) {
   const e = env || {};
   const questionCount = num(e.EXAM_QUESTION_COUNT, Number(DEFAULTS.EXAM_QUESTION_COUNT));
   const pointsPerQuestion = num(e.EXAM_POINTS_PER_QUESTION, Number(DEFAULTS.EXAM_POINTS_PER_QUESTION));
+  // 站点地址：只接受 http(s) 绝对地址，填错（如漏了协议、写成域名）就当作未配置，
+  // 由调用方回退到请求 origin，否则重定向会拼出坏地址。
+  const siteUrl = String(e.SITE_URL || '').trim().replace(/\/+$/, '');
+  const brandColor = String(e.BRAND_COLOR || '').trim();
   return {
-    // 站点域名，用于拼接回调地址，例如 dji-exam.airmole.cn
-    siteUrl: (e.SITE_URL || '').replace(/\/+$/, ''),
+    // 站点品牌：域名替换成自己的之后，标题、Logo、主题色都从这里来
+    siteName: String(e.SITE_NAME || '').trim() || DEFAULTS.SITE_NAME,
+    siteLogo: String(e.SITE_LOGO || '').trim() || DEFAULTS.SITE_LOGO,
+    brandColor: /^#[0-9a-fA-F]{3,8}$/.test(brandColor) ? brandColor : DEFAULTS.BRAND_COLOR,
+    siteUrl: ORIGIN_PATTERN.test(siteUrl) ? siteUrl : '',
     // 登出后回跳地址，必须是 OneID 应用里登记过的那个；留空则回站点首页
     logoutRedirectUri: (e.OIDC_LOGOUT_REDIRECT_URI || '').trim(),
     // 腾讯 OneID OIDC
@@ -43,13 +73,35 @@ export function getConfig(env) {
     totalScore: questionCount * pointsPerQuestion,
     passScore: num(e.EXAM_PASS_SCORE, Number(DEFAULTS.EXAM_PASS_SCORE)),
     durationMinutes: num(e.EXAM_DURATION_MINUTES, Number(DEFAULTS.EXAM_DURATION_MINUTES)),
-    // 会期签名密钥，未配置则回退到客户端密钥
+    // 0 表示不限次数
+    maxAttempts: nonNegative(e.EXAM_MAX_ATTEMPTS, Number(DEFAULTS.EXAM_MAX_ATTEMPTS)),
+    // 截止时间按北京时间（UTC+8）解析，形如 2026-12-31 23:59；留空表示不限
+    deadline: (e.EXAM_DEADLINE || '').trim(),
+    deadlineAt: parseDeadline(e.EXAM_DEADLINE),
+    showRanking: bool(e.EXAM_SHOW_RANKING, DEFAULTS.EXAM_SHOW_RANKING === 'true'),
+    // 交卷后是否把正确答案与逐题解析回给前端
+    showAnswer: bool(e.EXAM_SHOW_ANSWER, DEFAULTS.EXAM_SHOW_ANSWER === 'true'),
+    // 是否把答题记录写入 KV（关闭后成绩与解析只在交卷那一刻返回）
+    keepRecords: bool(e.EXAM_KEEP_RECORDS, DEFAULTS.EXAM_KEEP_RECORDS === 'true'),
+    // 会话签名密钥，未配置则回退到客户端密钥
     sessionSecret: e.SESSION_SECRET || e.OIDC_CLIENT_SECRET || 'insecure-dev-secret',
     // 管理后台白名单
     adminUsers: parseAdminList(e.ADMIN_USERS),
     // KV 绑定变量名（控制台绑定时填写的运行时变量名）
     kvBinding: e.KV_BINDING || 'EXAM_KV',
   };
+}
+
+/** 把 `2026-12-31 23:59`（UTC+8）解析成毫秒时间戳，解析不出返回 null */
+export function parseDeadline(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  const m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?$/);
+  if (!m) return null;
+  const [, y, mo, d, hh = '0', mm = '0', ss = '0'] = m;
+  // Date.UTC 用 UTC 算，再回退 8 小时即为北京时间(UTC+8)对应的真实时刻
+  const utc = Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(hh), Number(mm), Number(ss));
+  return utc - 8 * 3600 * 1000;
 }
 
 function looksLikeKV(v) {
@@ -76,7 +128,7 @@ export function getKV(env, config) {
     candidates.push([name, globalThis[name]]);
     candidates.push([`env.${name}`, (env || {})[name]]);
   }
-  for (const [label, value] of candidates) {
+  for (const [, value] of candidates) {
     if (looksLikeKV(value)) return value;
   }
   const seen = candidates

@@ -9,7 +9,7 @@ const config = {
   oidcClientId: 'test-client',
   oidcClientSecret: 'test-secret',
   oidcScopes: 'openid profile',
-  siteUrl: 'https://dji-exam.airmole.cn',
+  siteUrl: 'http://127.0.0.1:8787',
   sessionSecret: 'sess-secret',
   adminUsers: ['admin', 'admin@corp.com', '+8613800000000'],
 };
@@ -46,10 +46,10 @@ console.log('\n[2] 会话签发与读取');
 
 console.log('\n[3] redirect_uri 与授权地址');
 {
-  const req = new Request('https://dji-exam.airmole.cn/api/auth/login');
-  check('使用 SITE_URL 拼接回调', redirectUri(req, config) === 'https://dji-exam.airmole.cn/api/auth/callback');
+  const req = new Request('http://127.0.0.1:8787/api/auth/login');
+  check('使用 SITE_URL 拼接回调', redirectUri(req, config) === 'http://127.0.0.1:8787/api/auth/callback');
   const noSite = { ...config, siteUrl: '' };
-  check('无 SITE_URL 回退到请求 origin', redirectUri(req, noSite) === 'https://dji-exam.airmole.cn/api/auth/callback');
+  check('无 SITE_URL 回退到请求 origin', redirectUri(req, noSite) === 'http://127.0.0.1:8787/api/auth/callback');
   const url = new URL(await buildAuthorizeUrl(req, config, 'st', 'cc'));
   check('authorize 域名正确', url.origin + url.pathname === 'https://oauth2.account.tencent.com/authz/oidc/v2/1492474500942414067/authorize', url.toString());
   check('response_type=code', url.searchParams.get('response_type') === 'code');
@@ -99,7 +99,7 @@ console.log('\n[6] token 请求的报文（曾经在这里 500）');
   };
 
   try {
-    const req = new Request('https://dji-exam.airmole.cn/api/auth/callback');
+    const req = new Request('http://127.0.0.1:8787/api/auth/callback');
     const token = await exchangeCode(req, config, 'code-1', 'verifier-1');
     check('换 token 成功', token.access_token === 'at', JSON.stringify(token));
 
@@ -167,7 +167,7 @@ console.log('\n[7] 客户端认证方式的兜底');
     check('默认先 basic 再 post', clientAuthMethods(config).join(',') === 'basic,post');
     check('配置可指定首选', clientAuthMethods({ ...config, oidcClientAuthMethod: 'post' }).join(',') === 'post,basic');
 
-    const req = new Request('https://dji-exam.airmole.cn/api/auth/callback');
+    const req = new Request('http://127.0.0.1:8787/api/auth/callback');
     const token = await exchangeCode(req, config, 'code-2', 'verifier-2');
     check('basic 被拒后改用 post 换成 token', token.access_token === 'at2', JSON.stringify(token));
     check('共发了两次请求', calls.length === 2, `实际 ${calls.length}`);
@@ -199,15 +199,15 @@ console.log('\n[8] 登出地址');
 {
   const logout = new URL(await buildLogoutUrl(config, {
     idTokenHint: 'header.payload.sig',
-    postLogoutRedirect: 'https://dji-exam.airmole.cn/',
+    postLogoutRedirect: 'http://127.0.0.1:8787/',
   }));
   // 回归：PR #14 把端点改成了 /authz/fclogout，OneID 回「404 page not found」
   check('端点为 issuer 下的 /fclogout', logout.origin + logout.pathname === `${config.oidcIssuer}/fclogout`, logout.toString());
   check('带 client_id（曾经缺失导致 Missing client_id）', logout.searchParams.get('client_id') === config.oidcClientId, logout.toString());
-  check('带 post_logout_redirect_uri', logout.searchParams.get('post_logout_redirect_uri') === 'https://dji-exam.airmole.cn/');
+  check('带 post_logout_redirect_uri', logout.searchParams.get('post_logout_redirect_uri') === 'http://127.0.0.1:8787/');
   check('带 id_token_hint', logout.searchParams.get('id_token_hint') === 'header.payload.sig');
 
-  const noHint = new URL(await buildLogoutUrl(config, { postLogoutRedirect: 'https://dji-exam.airmole.cn/' }));
+  const noHint = new URL(await buildLogoutUrl(config, { postLogoutRedirect: 'http://127.0.0.1:8787/' }));
   check('无 id_token_hint 时仍带 client_id', noHint.searchParams.get('client_id') === config.oidcClientId);
   check('未配 issuer 返回 null', (await buildLogoutUrl({ ...config, oidcIssuer: '' }, {})) === null);
 
@@ -222,9 +222,9 @@ console.log('\n[8] 登出地址');
   }), { headers: { 'content-type': 'application/json' } });
   try {
     const issuer = 'https://id.example.com/authz/oidc/v2/app2';
-    const meta = new URL(await buildAuthorizeUrl(new Request('https://dji-exam.airmole.cn/api/auth/login'), { ...config, oidcIssuer: issuer }, 's', 'c'));
+    const meta = new URL(await buildAuthorizeUrl(new Request('http://127.0.0.1:8787/api/auth/login'), { ...config, oidcIssuer: issuer }, 's', 'c'));
     check('发现文档已就绪', meta.origin === 'https://id.example.com');
-    const url = new URL(await buildLogoutUrl({ ...config, oidcIssuer: issuer }, { postLogoutRedirect: 'https://dji-exam.airmole.cn/' }));
+    const url = new URL(await buildLogoutUrl({ ...config, oidcIssuer: issuer }, { postLogoutRedirect: 'http://127.0.0.1:8787/' }));
     check('优先使用 end_session_endpoint', url.origin + url.pathname === 'https://id.example.com/authz/oidc/v2/app2/fclogout', url.toString());
     check('切换 issuer 后按新 issuer 重新发现端点', url.origin + url.pathname === 'https://id.example.com/authz/oidc/v2/app2/fclogout', url.toString());
   } finally {
@@ -241,7 +241,7 @@ console.log('\n[8] 登出地址');
   }), { headers: { 'content-type': 'application/json' } });
   try {
     const issuer = 'https://id.example.com/authz/oidc/v2/app3';
-    await buildAuthorizeUrl(new Request('https://dji-exam.airmole.cn/api/auth/login'), { ...config, oidcIssuer: issuer }, 's', 'c');
+    await buildAuthorizeUrl(new Request('http://127.0.0.1:8787/api/auth/login'), { ...config, oidcIssuer: issuer }, 's', 'c');
     const url = new URL(await buildLogoutUrl({ ...config, oidcIssuer: issuer }, {}));
     check('相对地址的 end_session_endpoint 被忽略', url.origin + url.pathname === `${issuer}/fclogout`, url.toString());
   } finally {
@@ -258,7 +258,7 @@ console.log('\n[9] 登出回跳地址被 OneID 拒绝时的探测');
   // 线上现状：应用里没登记登出回跳地址，fclogout 回 invalid_request
   globalThis.fetch = stub(() => new Response(JSON.stringify({
     error: 'invalid_request',
-    error_description: 'Invalid post_logout_redirect_uri (https://dji-exam.airmole.cn/)',
+    error_description: 'Invalid post_logout_redirect_uri (http://127.0.0.1:8787/)',
   }), { status: 400, headers: { 'content-type': 'application/json' } }));
   try {
     const target = 'https://oauth2.account.tencent.com/authz/oidc/v2/app/fclogout?client_id=c';
@@ -269,7 +269,7 @@ console.log('\n[9] 登出回跳地址被 OneID 拒绝时的探测');
     globalThis.fetch = realFetch;
   }
 
-  globalThis.fetch = stub(() => new Response(null, { status: 302, headers: { location: 'https://dji-exam.airmole.cn/' } }));
+  globalThis.fetch = stub(() => new Response(null, { status: 302, headers: { location: 'http://127.0.0.1:8787/' } }));
   try {
     check('登记过回跳时视为受理（302）', (await logoutAccepted('https://oauth2.account.tencent.com/authz/oidc/v2/app/fclogout')) === true);
   } finally {

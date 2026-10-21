@@ -1,5 +1,6 @@
 // 应用入口：极简 hash 路由 + 页面渲染
 import { $, h } from './util.js';
+import { loadSite, titleOf } from './site.js';
 import { renderHome } from './pages/home.js';
 import { renderExam } from './pages/exam.js';
 import { renderResult } from './pages/result.js';
@@ -9,11 +10,11 @@ import { renderAdmin } from './pages/admin.js';
 const app = $('#app');
 
 const routes = [
-  { pattern: /^#?\/?$/, view: renderHome, title: '大疆机场 4 认证考试' },
-  { pattern: /^#\/exam$/, view: renderExam, title: '正在考试 · 大疆机场 4 认证考试' },
-  { pattern: /^#\/result\/(.+)$/, view: renderResult, title: '考试成绩 · 大疆机场 4 认证考试', params: (m) => ({ recordId: decodeURIComponent(m[1]) }) },
-  { pattern: /^#\/ranking$/, view: renderRanking, title: '成绩排名 · 大疆机场 4 认证考试' },
-  { pattern: /^#\/admin$/, view: renderAdmin, title: '管理后台 · 大疆机场 4 认证考试' },
+  { pattern: /^#?\/?$/, view: renderHome },
+  { pattern: /^#\/exam$/, view: renderExam, title: '正在考试' },
+  { pattern: /^#\/result\/(.+)$/, view: renderResult, title: '考试成绩', params: (m) => ({ recordId: decodeURIComponent(m[1]) }) },
+  { pattern: /^#\/ranking$/, view: renderRanking, title: '成绩排名' },
+  { pattern: /^#\/admin$/, view: renderAdmin, title: '管理后台' },
 ];
 
 let viewState = null;
@@ -45,11 +46,12 @@ async function render() {
   app.innerHTML = '<div class="loading">加载中…</div>';
 
   try {
+    await loadSite();
     const result = await route.view({ params, navigate, setLeaveGuard });
     viewState = result;
     app.innerHTML = '';
     app.appendChild(result.element);
-    document.title = result.title || route.title;
+    document.title = titleOf(result.title || route.title);
     window.scrollTo(0, 0);
   } catch (e) {
     app.innerHTML = '';

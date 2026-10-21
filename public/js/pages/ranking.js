@@ -2,9 +2,23 @@
 import { api } from '../api.js';
 import { h, fmtDuration, fmtDateTime } from '../util.js';
 import { topbar, errorCard } from '../components.js';
-import { closedNotice } from '../config.js';
+import { closedNotice, rankingEnabled } from '../site.js';
 
 export async function renderRanking({ navigate }) {
+  if (!rankingEnabled()) {
+    return {
+      element: h('div', { class: 'app' }, [
+        topbar(await api.meta().catch(() => ({}))),
+        h('div', { class: 'card' }, [
+          h('h2', { text: '未开放排名' }),
+          h('div', { class: 'notice notice-warn', text: '本场考试不公开成绩排名，交卷后可在成绩页查看本次得分。' }),
+          h('div', { class: 'btn-row mt' }, [h('button', { class: 'btn', text: '返回首页', onClick: () => navigate('#/') })]),
+        ]),
+      ]),
+      title: '成绩排名',
+    };
+  }
+
   let meta;
   let ranking;
   try {
@@ -62,7 +76,7 @@ export async function renderRanking({ navigate }) {
     ]),
   ];
 
-  return { element: h('div', { class: 'app' }, children), title: '成绩排名 · 大疆机场 4 认证考试' };
+  return { element: h('div', { class: 'app' }, children), title: '成绩排名' };
 }
 
 function rankClass(rank) {

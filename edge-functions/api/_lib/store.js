@@ -122,6 +122,21 @@ export async function getRecord(kv, id) {
   return getJSON(kv, `${RECORD_PREFIX}${id}`);
 }
 
+/** 管理端读取单条记录时按 EXAM_SHOW_ANSWER 裁剪逐题解析 */
+export function maskDetails(record, showAnswer) {
+  if (!record || showAnswer) return record;
+  return {
+    ...record,
+    details: (record.details || []).map((d) => ({ ...d, correctAnswer: null, isCorrect: null })),
+  };
+}
+
+/** 某个用户已完成的考试次数（关闭记录留存时为 0，等于不限次数） */
+export async function countAttempts(kv, sub) {
+  const idx = await getJSON(kv, `${USER_PREFIX}${keySegment(sub)}`);
+  return idx && Array.isArray(idx.records) ? idx.records.length : 0;
+}
+
 export async function getStats(kv) {
   const s = await getJSON(kv, STATS_KEY);
   if (!s) return null;

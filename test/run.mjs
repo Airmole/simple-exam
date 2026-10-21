@@ -2,6 +2,16 @@ import { createMockKV } from './mock-kv.js';
 import { handleApi } from '../edge-functions/api/_lib/router.js';
 import { createSession } from '../edge-functions/api/_lib/oidc.js';
 
+// 题库与题库总量：用例里按实际题量算分，换题库不用改断言
+const { getBank } = await import('../edge-functions/api/_lib/questions.js');
+const { answerOf, bankSize } = await (async () => {
+  const bank = await getBank();
+  const map = new Map(bank.map((q) => [q.id, q.answer]));
+  return { answerOf: (id) => map.get(id) ?? null, bankSize: bank.length };
+})();
+const QUESTION_COUNT = Number(10);
+const PASS_SCORE = Number(60);
+const PER_QUESTION = Number(10);
 const kv = createMockKV();
 
 // EdgeOne 是把绑定名注入成「全局变量」的，env 里并没有它。
@@ -11,11 +21,14 @@ globalThis.EXAM_KV = kv;
 const ENV = {
   EXAM_KV: 'kv-binding-name-not-the-object',
   SESSION_SECRET: 'test-secret',
-  SITE_URL: 'https://dji-exam.airmole.cn',
+  SITE_URL: 'http://127.0.0.1:8787',
   ADMIN_USERS: 'admin@corp.com,张三',
-  EXAM_QUESTION_COUNT: '50',
-  EXAM_POINTS_PER_QUESTION: '2',
-  EXAM_PASS_SCORE: '80',
+  SITE_NAME: '测试考试系统',
+  SITE_LOGO: 'T',
+  BRAND_COLOR: '#123456',
+  EXAM_QUESTION_COUNT: '10',
+  EXAM_POINTS_PER_QUESTION: '10',
+  EXAM_PASS_SCORE: '60',
   EXAM_DURATION_MINUTES: '30',
   OIDC_ISSUER: 'https://oauth2.account.tencent.com/authz/oidc/v2/1492474500942414067',
   OIDC_CLIENT_ID: '1492474500942414067',
@@ -31,7 +44,7 @@ async function call(method, path, { body, cookie, headers = {} } = {}) {
   const h = { ...headers };
   if (body) h['content-type'] = 'application/json';
   if (cookie) h['cookie'] = cookie;
-  const req = new Request(`https://dji-exam.airmole.cn${path}`, {
+  const req = new Request(`http://127.0.0.1:8787${path}`, {
     method, headers: h, body: body ? JSON.stringify(body) : undefined,
   });
   const res = await handleApi({ request: req, env: ENV, params: {} });
@@ -69,20 +82,51 @@ console.log('\n[0] KV 绑定解析');
   globalThis.EXAM_KV = saved;
 }
 
+console.log('\n[0.1] 站点配置');
+{
+  const { getConfig, parseDeadline } = await import('../edge-functions/api/_lib/config.js');
+  const site = await call('GET', '/api/site');
+  check('GET /api/site 200', site.status === 200, site.text);
+  check('站点名取 SITE_NAME', site.json.siteName === '测试考试系统', site.text);
+  check('Logo 取 SITE_LOGO', site.json.logo === 'T');
+  check('主题色取 BRAND_COLOR', site.json.brandColor === '#123456');
+  check('未配置截止时不截止', site.json.closed === false && site.json.deadlineAt === null);
+
+  const c = getConfig({});
+  check('默认站点名', c.siteName === '通用单选题考试系统', c.siteName);
+  check('非法主题色回退默认', getConfig({ BRAND_COLOR: 'red' }).brandColor === '#0f5fff');
+  check('非法 SITE_URL 视为未配置', getConfig({ SITE_URL: 'exam.example.com' }).siteUrl === '');
+  check('SITE_URL 去掉结尾斜杠', getConfig({ SITE_URL: 'https://exam.example.com/' }).siteUrl === 'https://exam.example.com');
+  check('开关缺省为开', getConfig({}).showRanking && getConfig({}).showAnswer && getConfig({}).keepRecords);
+  check('开关可关', getConfig({ EXAM_SHOW_RANKING: 'false', EXAM_SHOW_ANSWER: '0', EXAM_KEEP_RECORDS: 'off' }).showRanking === false
+    && getConfig({ EXAM_SHOW_ANSWER: '0' }).showAnswer === false
+    && getConfig({ EXAM_KEEP_RECORDS: 'off' }).keepRecords === false);
+  check('次数缺省不限', getConfig({}).maxAttempts === 0);
+  check('次数正整数生效', getConfig({ EXAM_MAX_ATTEMPTS: '3' }).maxAttempts === 3);
+
+  // 截止时间按北京时间解析
+  check('解析 2026-12-31 23:59', parseDeadline('2026-12-31 23:59') === Date.UTC(2026, 11, 31, 15, 59), String(parseDeadline('2026-12-31 23:59')));
+  check('支持 T 分隔与秒', parseDeadline('2026-01-01T00:00:00') === Date.UTC(2025, 11, 31, 16, 0, 0));
+  check('非法截止时间返回 null', parseDeadline('明天') === null && parseDeadline('') === null);
+}
+
 console.log('\n[1] 公开接口');
 {
   const r = await call('GET', '/api/meta');
   check('GET /api/meta 200', r.status === 200, r.text);
-  check('题库 100 题', r.json.bankSize === 100, JSON.stringify(r.json));
-  check('规则满分 100', r.json.rules.totalScore === 100);
+  check('题库题量与文件一致', r.json.bankSize === bankSize, JSON.stringify(r.json));
+  check('规则满分 = 题数 × 每题分值', r.json.rules.totalScore === QUESTION_COUNT * PER_QUESTION, JSON.stringify(r.json.rules));
   check('未登录不是管理员', r.json.isAdmin === false);
+  check('meta 带站点配置', r.json.site && r.json.site.siteName === '测试考试系统', JSON.stringify(r.json.site));
+  check('未登录不限次数提示为空', r.json.attemptsLeft === null);
 }
 {
   const r = await call('GET', '/api/exam/rules');
-  check('规则：50题/2分/100总分/80及格/30分钟',
-    r.json.rules.questionCount === 50 && r.json.rules.pointsPerQuestion === 2
-    && r.json.rules.totalScore === 100 && r.json.rules.passScore === 80
+  check('规则：抽题数/每题分值/满分/及格/时长按环境变量',
+    r.json.rules.questionCount === QUESTION_COUNT && r.json.rules.pointsPerQuestion === PER_QUESTION
+    && r.json.rules.totalScore === QUESTION_COUNT * PER_QUESTION && r.json.rules.passScore === PASS_SCORE
     && r.json.rules.durationMinutes === 30, r.text);
+  check('题量超过题库时按题库上限', r.json.rules.questionCount <= bankSize);
 }
 
 console.log('\n[2] 未登录保护');
@@ -105,9 +149,9 @@ let paper, cookie;
   const r = await call('POST', '/api/exam/start', { cookie, body: {} });
   check('start 200', r.status === 200, r.text);
   paper = r.json;
-  check('抽 50 题', paper.questions.length === 50, String(paper.questions.length));
-  check('题目不重复', new Set(paper.questions.map(q => q.id)).size === 50);
-  check('题号在 1-100', paper.questions.every(q => Number.isInteger(q.id) && q.id >= 1 && q.id <= 100));
+  check(`抽 ${QUESTION_COUNT} 题`, paper.questions.length === QUESTION_COUNT, String(paper.questions.length));
+  check('题目不重复', new Set(paper.questions.map(q => q.id)).size === QUESTION_COUNT);
+  check('题号都在题库里', paper.questions.every(q => answerOf(q.id) != null));
   check('下发题目不含正确答案', paper.questions.every(q => q.answer === undefined));
   check('原题号字段存在', paper.questions.every(q => q.originalId === q.id));
   check('返回开始时间/过期时间', !!paper.startedAt && paper.expiresAt > paper.startedAt);
@@ -117,14 +161,14 @@ let paper, cookie;
 console.log('\n[4] 交卷判分（全对）');
 let perfectRecordId;
 {
-  const { answerOf } = await import('../edge-functions/api/_lib/questions.js');
   const answers = {};
   paper.questions.forEach(q => { answers[q.id] = answerOf(q.id); });
   const r = await call('POST', '/api/exam/submit', { cookie, body: { answers } });
   check('submit 200', r.status === 200, r.text);
-  check('满分 100', r.json.score === 100, String(r.json.score));
+  check(`满分 ${QUESTION_COUNT * PER_QUESTION}`, r.json.score === QUESTION_COUNT * PER_QUESTION, String(r.json.score));
   check('合格', r.json.passed === true);
-  check('记录逐题明细', r.json.details.length === 50);
+  check('返回记录 id', !!r.json.recordId);
+  check('记录逐题明细', r.json.details.length === QUESTION_COUNT);
   check('明细含正确答案与用户答案', r.json.details.every(d => d.correctAnswer && d.submittedAnswer));
   check('用时 >= 0', r.json.durationMs >= 0);
   perfectRecordId = r.json.recordId;
@@ -139,30 +183,30 @@ console.log('\n[5] 部分正确与不合格');
   const c2 = await sessionCookie(other);
   const start = await call('POST', '/api/exam/start', { cookie: c2, body: {} });
   const qs = start.json.questions;
-  const { answerOf } = await import('../edge-functions/api/_lib/questions.js');
   const answers = {};
-  // 只答对前 10 题 = 20 分
-  qs.forEach((q, i) => { if (i < 10) answers[q.id] = answerOf(q.id); else answers[q.id] = 'Z'; });
+  // 只答对前 3 题
+  qs.forEach((q, i) => { if (i < 3) answers[q.id] = answerOf(q.id); else answers[q.id] = 'Z'; });
   const r = await call('POST', '/api/exam/submit', { cookie: c2, body: { answers } });
-  check('20 分', r.json.score === 20, String(r.json.score));
+  check(`${3 * PER_QUESTION} 分`, r.json.score === 3 * PER_QUESTION, String(r.json.score));
   check('不合格', r.json.passed === false);
-  check('错题记录用户答案 Z', r.json.details.filter(d => d.submittedAnswer === 'Z').length === 40);
+  // 非法选项（多选/不在选项里）按未作答处理，不会被记成用户答案
+  check('非法选项按未作答', r.json.details.filter(d => d.submittedAnswer === null).length === QUESTION_COUNT - 3,
+    JSON.stringify(r.json.details.map(d => d.submittedAnswer)));
 }
 
 console.log('\n[6] 排名（同分用时短靠前）');
 {
-  // 再考一次拿更高分（另一用户答 45 题 = 90 分）
+  // 再考一次拿次高分（另一用户只答对 1 题）
   const c3 = await sessionCookie({ sub: 'u_student_3', name: '赵六', username: 'zhaoliu' });
   const start = await call('POST', '/api/exam/start', { cookie: c3, body: {} });
   const qs = start.json.questions;
-  const { answerOf } = await import('../edge-functions/api/_lib/questions.js');
   const answers = {};
-  qs.forEach((q, i) => { answers[q.id] = i < 45 ? answerOf(q.id) : 'Z'; });
+  qs.forEach((q, i) => { answers[q.id] = i < 1 ? answerOf(q.id) : 'Z'; });
   await call('POST', '/api/exam/submit', { cookie: c3, body: { answers } });
 
   const r = await call('GET', '/api/ranking');
   check('ranking 200', r.status === 200, r.text);
-  check('排名第一是 100 分', r.json.ranking[0].score === 100, JSON.stringify(r.json.ranking));
+  check('排名第一是满分', r.json.ranking[0].score === QUESTION_COUNT * PER_QUESTION, JSON.stringify(r.json.ranking));
   check('排名含 3 人', r.json.ranking.length === 3, String(r.json.ranking.length));
   const scores = r.json.ranking.map(x => x.score);
   check('按分数降序', scores.every((s, i) => i === 0 || scores[i - 1] >= s), JSON.stringify(scores));
@@ -185,10 +229,11 @@ console.log('\n[7] 管理后台权限');
   check('管理员 stats 200', s.status === 200, s.text);
   check('考试人数 3', s.json.stats.uniqueUsers === 3, JSON.stringify(s.json.stats));
   check('考试次数 3', s.json.stats.attempts === 3, JSON.stringify(s.json.stats));
-  check('合格率 66.7 (100/90 合格)', s.json.stats.passRate === 66.7, String(s.json.stats.passRate));
-  check('最高分 100', s.json.stats.maxScore === 100);
-  check('最低分 20', s.json.stats.minScore === 20);
-  check('平均分 (100+90+20)/3=70', s.json.stats.avgScore === 70, String(s.json.stats.avgScore));
+  check('合格率 33.3（只有满分那次合格）', s.json.stats.passRate === 33.3, String(s.json.stats.passRate));
+  check('最高分是满分', s.json.stats.maxScore === QUESTION_COUNT * PER_QUESTION);
+  check(`最低分 ${PER_QUESTION}`, s.json.stats.minScore === PER_QUESTION);
+  const expectedAvg = Math.round(((QUESTION_COUNT * PER_QUESTION) + PER_QUESTION + (3 * PER_QUESTION)) / 3 * 10) / 10;
+  check('平均分按实际得分算', s.json.stats.avgScore === expectedAvg, `${s.json.stats.avgScore} vs ${expectedAvg}`);
   check('最快/最慢答题有值', s.json.extra.fastest && s.json.extra.slowest);
 
   const rec = await call('GET', '/api/admin/records', { cookie: c });
@@ -198,22 +243,20 @@ console.log('\n[7] 管理后台权限');
 
   const d = await call('GET', `/api/admin/record?id=${perfectRecordId}`, { cookie: c });
   check('记录详情 200', d.status === 200, d.text);
-  check('详情含 50 题明细', d.json.record.details.length === 50);
+  check(`详情含 ${QUESTION_COUNT} 题明细`, d.json.record.details.length === QUESTION_COUNT);
   check('详情含正确答案', d.json.record.details.every(x => x.correctAnswer && x.submittedAnswer));
 }
 
 console.log('\n[8] 同名用户多次考试取最高分');
 {
-  const c = await sessionCookie(student);
   const start = await call('POST', '/api/exam/start', { cookie, body: {} });
   const qs = start.json.questions;
-  const { answerOf } = await import('../edge-functions/api/_lib/questions.js');
   const answers = {};
-  qs.forEach((q, i) => { answers[q.id] = i < 30 ? answerOf(q.id) : 'Z'; }); // 60 分，低于 100
+  qs.forEach((q, i) => { answers[q.id] = i < 2 ? answerOf(q.id) : 'Z'; }); // 次高分，低于满分
   await call('POST', '/api/exam/submit', { cookie, body: { answers } });
   const r = await call('GET', '/api/ranking');
   const me = r.json.ranking.find(x => x.name === '李四');
-  check('李四仍取最高分 100', me && me.score === 100, JSON.stringify(me));
+  check('李四仍取最高分', me && me.score === QUESTION_COUNT * PER_QUESTION, JSON.stringify(me));
   check('排名人数仍为 3', r.json.ranking.length === 3, String(r.json.ranking.length));
   const stats = await call('GET', '/api/admin/stats', { cookie: await sessionCookie(adminUser) });
   check('考试次数变 4', stats.json.stats.attempts === 4, String(stats.json.stats.attempts));
@@ -264,7 +307,7 @@ console.log('\n[11] 登出与未知接口');
     const c = await sessionCookie(student);
     const r = await call('GET', '/api/auth/logout', { cookie: c });
     const location = r.headers.get('location') || '';
-    check('回跳被拒时退回本站首页', location === 'https://dji-exam.airmole.cn/', location);
+    check('回跳被拒时退回本站首页', location === 'http://127.0.0.1:8787/', location);
     check('回跳被拒时也清了会话 cookie', /exam_session=;/.test(String(r.headers.getSetCookie ? r.headers.getSetCookie().join(';') : r.headers.get('set-cookie'))));
   } finally {
     globalThis.fetch = realFetch;
@@ -272,7 +315,7 @@ console.log('\n[11] 登出与未知接口');
 
   // OneID 受理（302 到回跳地址）时才把人交给 fclogout
   const acceptFetch = async (url) => (String(url).includes('/fclogout')
-    ? new Response(null, { status: 302, headers: { location: 'https://dji-exam.airmole.cn/' } })
+    ? new Response(null, { status: 302, headers: { location: 'http://127.0.0.1:8787/' } })
     : realFetch(url));
   globalThis.fetch = acceptFetch;
   try {
@@ -294,7 +337,7 @@ console.log('\n[11] 登出与未知接口');
   // 回跳地址配成外站、且 OneID 不认时，本站只该回自己家，别把人送去别人的域名
   globalThis.fetch = rejectFetch;
   try {
-    const req = new Request('https://dji-exam.airmole.cn/api/auth/logout');
+    const req = new Request('http://127.0.0.1:8787/api/auth/logout');
     const saved = ENV.OIDC_LOGOUT_REDIRECT_URI;
     ENV.OIDC_LOGOUT_REDIRECT_URI = 'https://evil.example.com/';
     let loc;
@@ -304,7 +347,7 @@ console.log('\n[11] 登出与未知接口');
       if (saved === undefined) delete ENV.OIDC_LOGOUT_REDIRECT_URI;
       else ENV.OIDC_LOGOUT_REDIRECT_URI = saved;
     }
-    check('外站回跳地址只回本站首页', loc === 'https://dji-exam.airmole.cn/', String(loc));
+    check('外站回跳地址只回本站首页', loc === 'http://127.0.0.1:8787/', String(loc));
   } finally {
     globalThis.fetch = realFetch;
   }
@@ -320,11 +363,11 @@ async function checkLogoutTargets() {
   const out = new URL(location);
   check('logout 跳到 OneID 的 fclogout', out.origin + out.pathname === `${ENV.OIDC_ISSUER}/fclogout`, location);
   check('logout 带 client_id', out.searchParams.get('client_id') === ENV.OIDC_CLIENT_ID, location);
-  check('logout 带回跳地址', out.searchParams.get('post_logout_redirect_uri') === 'https://dji-exam.airmole.cn/', location);
+  check('logout 带回跳地址', out.searchParams.get('post_logout_redirect_uri') === 'http://127.0.0.1:8787/', location);
 
   // 回跳地址可配：填 OneID 里真正登记过的那个，别硬拼站点根
   const savedEnv = { ...ENV };
-  ENV.OIDC_LOGOUT_REDIRECT_URI = 'https://dji-exam.airmole.cn/logout-done';
+  ENV.OIDC_LOGOUT_REDIRECT_URI = 'http://127.0.0.1:8787/logout-done';
   try {
     const r2 = await call('GET', '/api/auth/logout', { cookie: c });
     const loc2 = r2.headers.get('location') || '';
@@ -373,6 +416,115 @@ console.log('\n[12] 空数据池上的首查分页（线上 cursor 严格校验�
   check('300 条记录全部翻到（分页正确）', many.status === 200 && many.json.ranking.length === 300, many.text.slice(0, 120));
 
   globalThis.EXAM_KV = saved;
+}
+
+console.log('\n[13] 次数限制 / 截止时间 / 排名开关（独立 KV）');
+{
+  const limitKv = createMockKV();
+  const savedGlobal = globalThis.EXAM_KV;
+  const savedEnv = { ...ENV };
+  globalThis.EXAM_KV = limitKv;
+  const studentC = await sessionCookie({ sub: 'u_limit', name: '限次考生', username: 'limit' });
+
+  try {
+    ENV.EXAM_MAX_ATTEMPTS = '1';
+    const first = await call('POST', '/api/exam/start', { cookie: studentC, body: {} });
+    check('第 1 次可开考', first.status === 200, first.text);
+    const answers = {};
+    first.json.questions.forEach((q) => { answers[q.id] = answerOf(q.id); });
+    await call('POST', '/api/exam/submit', { cookie: studentC, body: { answers } });
+    const second = await call('POST', '/api/exam/start', { cookie: studentC, body: {} });
+    check('超过次数被拒（403）', second.status === 403 && second.json.code === 'ATTEMPTS_EXCEEDED', second.text);
+    const me = await call('GET', '/api/auth/me', { cookie: studentC });
+    check('me 返回剩余次数 0', me.json.attemptsLeft === 0 && me.json.attempts === 1, me.text);
+
+    // 截止时间：设成过去即立刻关闭
+    ENV.EXAM_MAX_ATTEMPTS = '0';
+    ENV.EXAM_DEADLINE = '2020-01-01 00:00';
+    const closedStart = await call('POST', '/api/exam/start', { cookie: studentC, body: {} });
+    check('截止后不可开考（403 EXAM_CLOSED）', closedStart.status === 403 && closedStart.json.code === 'EXAM_CLOSED', closedStart.text);
+    const siteClosed = await call('GET', '/api/site');
+    check('截止后 /api/site 标记 closed', siteClosed.json.closed === true && siteClosed.json.deadline === '2020-01-01 00:00', siteClosed.text);
+    delete ENV.EXAM_DEADLINE;
+
+    // 排名开关
+    ENV.EXAM_SHOW_RANKING = 'false';
+    const noRanking = await call('GET', '/api/ranking');
+    check('关闭排名后接口 403', noRanking.status === 403 && noRanking.json.code === 'RANKING_DISABLED', noRanking.text);
+    const siteNoRank = await call('GET', '/api/site');
+    check('关闭排名后 /api/site 同步', siteNoRank.json.showRanking === false, siteNoRank.text);
+    delete ENV.EXAM_SHOW_RANKING;
+  } finally {
+    Object.keys(ENV).forEach((k) => { if (!(k in savedEnv)) delete ENV[k]; });
+    Object.assign(ENV, savedEnv);
+    globalThis.EXAM_KV = savedGlobal;
+  }
+}
+
+console.log('\n[14] 解析开关与不留存记录（独立 KV）');
+{
+  const privacyKv = createMockKV();
+  const savedGlobal = globalThis.EXAM_KV;
+  const savedEnv = { ...ENV };
+  globalThis.EXAM_KV = privacyKv;
+  const c = await sessionCookie({ sub: 'u_privacy', name: '隐私考生', username: 'privacy' });
+
+  try {
+    // 关闭解析：只给分，不给答案与对错
+    ENV.EXAM_SHOW_ANSWER = 'false';
+    const start1 = await call('POST', '/api/exam/start', { cookie: c, body: {} });
+    const answers1 = {};
+    start1.json.questions.forEach((q) => { answers1[q.id] = answerOf(q.id); });
+    const r1 = await call('POST', '/api/exam/submit', { cookie: c, body: { answers: answers1 } });
+    check('关闭解析仍正常判分', r1.status === 200 && r1.json.score === QUESTION_COUNT * PER_QUESTION, r1.text);
+    check('关闭解析不回正确答案', r1.json.details.every((d) => d.correctAnswer === null && d.isCorrect === null), r1.text.slice(0, 200));
+    check('关闭解析仍回用户作答', r1.json.details.every((d) => d.submittedAnswer), r1.text.slice(0, 200));
+
+    // 管理端详情同样被裁剪
+    const adminC = await sessionCookie(adminUser);
+    const detail = await call('GET', `/api/admin/record?id=${r1.json.recordId}`, { cookie: adminC });
+    check('管理端详情同步裁剪正确答案', detail.json.record.details.every((d) => d.correctAnswer === null), detail.text.slice(0, 200));
+    delete ENV.EXAM_SHOW_ANSWER;
+
+    // 不留存记录：不落 KV，但成绩照样返回
+    ENV.EXAM_KEEP_RECORDS = 'false';
+    const before = privacyKv.store.size;
+    const start2 = await call('POST', '/api/exam/start', { cookie: c, body: {} });
+    const r2 = await call('POST', '/api/exam/submit', { cookie: c, body: { answers: {} } });
+    check('不留存时仍返回成绩', r2.status === 200 && r2.json.score === 0, r2.text);
+    check('不留存时 recordId 为空', r2.json.recordId === null, JSON.stringify(r2.json.recordId));
+    check('不留存时不写记录', privacyKv.store.size === before, `${before} -> ${privacyKv.store.size}`);
+    // 前面那一轮开了解析开关、留着记录，排名里那条是它；这一轮不该再新增
+    const ranking2 = await call('GET', '/api/ranking');
+    check('不留存时不再产生新记录', ranking2.json.ranking.filter((x) => x.sub === 'u_privacy').length === 1, ranking2.text.slice(0, 200));
+    check('排名里只有上一轮的分数', ranking2.json.ranking.find((x) => x.sub === 'u_privacy').score === QUESTION_COUNT * PER_QUESTION, ranking2.text.slice(0, 200));
+    delete ENV.EXAM_KEEP_RECORDS;
+  } finally {
+    Object.keys(ENV).forEach((k) => { if (!(k in savedEnv)) delete ENV[k]; });
+    Object.assign(ENV, savedEnv);
+    globalThis.EXAM_KV = savedGlobal;
+  }
+}
+
+console.log('\n[15] 超时交卷被拒');
+{
+  const lateKv = createMockKV();
+  const savedGlobal = globalThis.EXAM_KV;
+  globalThis.EXAM_KV = lateKv;
+  try {
+    const c = await sessionCookie({ sub: 'u_late', name: '迟到考生', username: 'late' });
+    const start = await call('POST', '/api/exam/start', { cookie: c, body: {} });
+    // 把已落库的试卷改成「1 小时前就过期」
+    const key = 'exam_paper_u_late';
+    const paperRaw = JSON.parse(await lateKv.get(key));
+    paperRaw.expiresAt = Date.now() - 3600 * 1000;
+    await lateKv.put(key, JSON.stringify(paperRaw));
+    const r = await call('POST', '/api/exam/submit', { cookie: c, body: { answers: {} } });
+    check('超时交卷 409 EXAM_TIMEOUT', r.status === 409 && r.json.code === 'EXAM_TIMEOUT', r.text);
+    check('超时后试卷被清理', (await lateKv.get(key)) === null);
+  } finally {
+    globalThis.EXAM_KV = savedGlobal;
+  }
 }
 
 console.log(`\n结果: ${pass} 通过, ${failCount} 失败`);

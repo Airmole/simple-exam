@@ -2,7 +2,7 @@
 import { api } from '../api.js';
 import { h, fmtDateTime, fmtDuration, notice } from '../util.js';
 import { topbar, errorCard } from '../components.js';
-import { closedNotice } from '../config.js';
+import { closedNotice, rankingEnabled } from '../site.js';
 
 const PAD = (children) => h('div', { class: 'app' }, children);
 
@@ -21,7 +21,6 @@ export async function renderResult({ params, navigate }) {
     };
   }
 
-  // 成绩可在交卷后从 sessionStorage 读取（含解析所需题目信息）
   let result = readStored(params.recordId);
 
   if (!result) {
@@ -37,25 +36,32 @@ export async function renderResult({ params, navigate }) {
   const closed = closedNotice();
   const detailMap = new Map((result.details || []).map((d) => [d.id, d]));
   const questions = result.questions || [];
-  const pointsPer = result.rules?.pointsPerQuestion ?? 2;
-  const passScore = result.passScore ?? result.rules?.passScore ?? 80;
-  const passed = result.passed ?? result.score >= passScore;
+  const total = result.total || questions.length || (result.details || []).length;
+  const pointsPer = result.rules?.pointsPerQuestion
+    ?? (total ? Math.round((result.totalScore || result.score) / total) : null);
+  const fullScore = result.totalScore ?? (total && pointsPer ? total * pointsPer : null);
+  const passScore = result.passScore ?? result.rules?.passScore ?? null;
+  const passed = result.passed ?? (passScore != null && result.score >= passScore);
+  const showAnswer = result.showAnswer !== false;
 
   const summaryCard = h('div', { class: 'card' }, [
     h('div', { class: 'score-hero' }, [
       h('div', { class: `score-big ${passed ? 'pass' : 'fail'}`, text: String(result.score) }),
-      h('div', { class: 'score-sub', text: `满分 ${result.total * pointsPer} 分 · 合格线 ${passScore} 分` }),
+      h('div', { class: 'score-sub', text: [
+        fullScore != null ? `满分 ${fullScore} 分` : null,
+        passScore != null ? `合格线 ${passScore} 分` : null,
+      ].filter(Boolean).join(' · ') || `共 ${total} 题` }),
     ]),
     h('div', { class: 'center mt' }, [
       notice(passed ? 'ok' : 'bad', passed
-        ? `恭喜，考试合格！答对 ${result.correctCount} / ${result.total} 题。`
-        : `很遗憾，未达到 ${passScore} 分。答对 ${result.correctCount} / ${result.total} 题，请重新参加考试。`),
+        ? `恭喜，考试合格！答对 ${result.correctCount} / ${total} 题。`
+        : `很遗憾，未达到 ${passScore} 分。答对 ${result.correctCount} / ${total} 题，请重新参加考试。`),
     ]),
     h('div', { class: 'rules mt' }, [
       statBox('答题开始', fmtDateTime(result.startedAt)),
       statBox('答题结束', fmtDateTime(result.finishedAt)),
       statBox('答题用时', fmtDuration(result.durationMs)),
-      statBox('答对题数', `${result.correctCount} / ${result.total}`),
+      statBox('答对题数', `${result.correctCount} / ${total}`),
     ]),
     h('div', { class: 'btn-row mt' }, [
       closed
@@ -64,19 +70,22 @@ export async function renderResult({ params, navigate }) {
           class: 'btn btn-primary', text: '再考一次',
           onClick: () => { clearStored(params.recordId); navigate('#/exam'); },
         }),
-      h('button', { class: 'btn', text: '查看成绩排名', onClick: () => navigate('#/ranking') }),
+      rankingEnabled() ? h('button', { class: 'btn', text: '查看成绩排名', onClick: () => navigate('#/ranking') }) : null,
       h('button', { class: 'btn', text: '返回首页', onClick: () => navigate('#/') }),
     ]),
   ]);
 
+  // 逐题解析的内容在交卷那一刻才完整；刷新后若记录被裁剪，就只能看分数
+  const detailItems = questions.map((q, i) => detailItem(q, i, detailMap.get(q.id), { showAnswer }));
   const detailCard = h('div', { class: 'card' }, [
-    h('h3', { text: '答题详情（正确答案与你的作答）', style: 'margin-top:0' }),
-    h('div', { class: 'detail-list' }, questions.map((q, i) => detailItem(q, i, detailMap.get(q.id)))),
+    h('h3', { text: showAnswer ? '答题详情（正确答案与你的作答）' : '答题详情（你的作答）', style: 'margin-top:0' }),
+    showAnswer ? null : h('div', { class: 'muted', style: 'margin-bottom:8px', text: '本次考试不公开正确答案，仅展示你的作答。' }),
+    h('div', { class: 'detail-list' }, detailItems),
   ]);
 
   return {
-    element: PAD([topbar(meta), summaryCard, detailCard]),
-    title: `成绩 ${result.score} 分 · 大疆机场 4 认证考试`,
+    element: PAD([topbar(meta), summaryCard, detailItems.length ? detailCard : null].filter(Boolean)),
+    title: `成绩 ${result.score} 分`,
   };
 }
 
@@ -87,22 +96,21 @@ function statBox(k, v) {
   ]);
 }
 
-function detailItem(q, i, d = {}) {
+function detailItem(q, i, d = {}, { showAnswer = true } = {}) {
   const originalId = q.originalId != null ? q.originalId : q.id;
-  const right = !!d.isCorrect;
-  const correctText = d.correctAnswer
-    ? `${d.correctAnswer}${d.options?.[d.correctAnswer] ? `（${d.options[d.correctAnswer]}）` : ''}`
-    : '—';
-  const mineText = d.submittedAnswer
-    ? `${d.submittedAnswer}${d.options?.[d.submittedAnswer] ? `（${d.options[d.submittedAnswer]}）` : ''}`
-    : '未作答';
-  return h('div', { class: `detail-item${right ? '' : ' wrong'}` }, [
+  const judged = showAnswer && typeof d.isCorrect === 'boolean';
+  const right = judged && d.isCorrect;
+  const optionText = (key, options) => (key
+    ? `${key}${(options || q.options)?.[key] ? `（${(options || q.options)[key]}）` : ''}`
+    : null);
+  const mineText = optionText(d.submittedAnswer, d.options) || '未作答';
+  return h('div', { class: `detail-item${judged && !right ? ' wrong' : ''}` }, [
     h('div', { class: 'q' }, [
       `${i + 1}. ${q.question}`,
-      h('span', { class: `tag ${right ? 'tag-ok' : 'tag-bad'}`, text: right ? '答对' : '答错' }),
+      judged ? h('span', { class: `tag ${right ? 'tag-ok' : 'tag-bad'}`, text: right ? '答对' : '答错' }) : null,
     ]),
-    h('div', { class: 'detail-line', text: `原题号 #${originalId}` }),
-    h('div', { class: 'detail-line', text: `正确答案：${correctText}` }),
+    h('div', { class: 'detail-line', text: `题库 #${originalId}` }),
+    showAnswer ? h('div', { class: 'detail-line', text: `正确答案：${optionText(d.correctAnswer, d.options) || '—'}` }) : null,
     h('div', { class: 'detail-line', text: `你的作答：${mineText}` }),
   ]);
 }
@@ -111,26 +119,30 @@ function notFound(meta, navigate) {
   return {
     element: PAD([topbar(meta), h('div', { class: 'card' }, [
       h('h2', { text: '找不到成绩记录' }),
-      notice('warn', '成绩解析仅在交卷后的当前浏览器会话内可查看，请前往成绩排名查看分数。'),
+      notice('warn', '成绩解析仅在交卷后的当前浏览器会话内可查看。'),
       h('div', { class: 'btn-row mt' }, [
-        h('button', { class: 'btn btn-primary', text: '查看成绩排名', onClick: () => navigate('#/ranking') }),
+        rankingEnabled() ? h('button', { class: 'btn btn-primary', text: '查看成绩排名', onClick: () => navigate('#/ranking') }) : null,
         h('button', { class: 'btn', text: '返回首页', onClick: () => navigate('#/') }),
-      ]),
+      ].filter(Boolean)),
     ])]),
     title: '找不到成绩',
   };
 }
 
+// 从管理端记录还原成绩页：正确答案是否可见取决于记录里是否还有 correctAnswer
 function fromRecord(r) {
-  const pointsPer = r.correctCount ? Math.max(1, Math.round(r.score / r.correctCount)) : 2;
   return {
     ...r,
-    rules: { passScore: r.passScore, pointsPerQuestion: pointsPer },
+    totalScore: r.total && r.correctCount != null && r.score
+      ? r.total * Math.round(r.score / Math.max(1, r.correctCount))
+      : null,
+    showAnswer: (r.details || []).some((d) => d.correctAnswer),
     questions: (r.details || []).map((d) => ({ id: d.id, question: d.question, options: d.options })),
   };
 }
 
-const storeKey = (id) => `exam_result_${id}`;
+// 'latest' 用于未留存记录（EXAM_KEEP_RECORDS=false）时的成绩页
+const storeKey = (id) => (id === 'latest' ? 'exam_result_latest' : `exam_result_${id}`);
 function readStored(id) {
   try {
     const raw = sessionStorage.getItem(storeKey(id));

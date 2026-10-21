@@ -10,7 +10,7 @@ import { handleApi } from '../edge-functions/api/_lib/router.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const PORT = Number(process.env.PORT || 8787);
-// 可选：设置后本地即可查看考试已截止的界面（对应 public/js/config.js 的 DEADLINE）
+// 下面的环境变量都能从命令行覆盖，例如 EXAM_DEADLINE='2020-01-01 00:00' 可看已截止界面
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 
 // EdgeOne 把 KV 绑定注入为全局变量，本地照着实情模拟，别在 env 上放一份假的
@@ -26,10 +26,19 @@ const ENV = {
   // 留空则回站点首页；填上本地 mock 登记过的地址可验证「去 OneID 再跳回来」
   OIDC_LOGOUT_REDIRECT_URI: process.env.OIDC_LOGOUT_REDIRECT_URI || '',
   ADMIN_USERS: process.env.ADMIN_USERS || 'admin',
-  EXAM_QUESTION_COUNT: '50',
-  EXAM_POINTS_PER_QUESTION: '2',
-  EXAM_PASS_SCORE: '80',
-  EXAM_DURATION_MINUTES: process.env.EXAM_DURATION_MINUTES || '60',
+  // 站点品牌与考试规则：都能用环境变量在本地先试一遍
+  SITE_NAME: process.env.SITE_NAME || '单选题考试系统',
+  SITE_LOGO: process.env.SITE_LOGO || 'Q',
+  BRAND_COLOR: process.env.BRAND_COLOR || '#0f5fff',
+  EXAM_QUESTION_COUNT: process.env.EXAM_QUESTION_COUNT || '10',
+  EXAM_POINTS_PER_QUESTION: process.env.EXAM_POINTS_PER_QUESTION || '10',
+  EXAM_PASS_SCORE: process.env.EXAM_PASS_SCORE || '60',
+  EXAM_DURATION_MINUTES: process.env.EXAM_DURATION_MINUTES || '30',
+  EXAM_MAX_ATTEMPTS: process.env.EXAM_MAX_ATTEMPTS || '0',
+  EXAM_DEADLINE: process.env.EXAM_DEADLINE || '',
+  EXAM_SHOW_RANKING: process.env.EXAM_SHOW_RANKING || 'true',
+  EXAM_SHOW_ANSWER: process.env.EXAM_SHOW_ANSWER || 'true',
+  EXAM_KEEP_RECORDS: process.env.EXAM_KEEP_RECORDS || 'true',
 };
 
 const MIME = {
@@ -62,19 +71,15 @@ async function serveStatic(req, res) {
   const url = new URL(req.url, ORIGIN);
   let filePath = path.join(PUBLIC_DIR, decodeURIComponent(url.pathname));
 
-  // 本地验证考试截止状态：EXAM_DEADLINE='2026-01-31 23:59' node test/dev-server.mjs
-  if (process.env.EXAM_DEADLINE && url.pathname === '/js/config.js') {
-    const src = fs.readFileSync(filePath, 'utf8').replace(/^const DEADLINE = .*$/m, `const DEADLINE = '${process.env.EXAM_DEADLINE}';`);
-    res.writeHead(200, { 'content-type': MIME['.js'] });
-    return res.end(src);
-  }
+  // 本地验证考试截止状态：EXAM_DEADLINE='2026-12-31 23:59' node test/dev-server.mjs
+  // 截止时间由 /api/site 下发，静态资源不再需要改写
 
   // 登出后回跳的落地页：真站点也得有这么个页面，不然 OneID 跳回来是 404
   if (url.pathname === '/logout-done' || url.pathname === '/logout-done/') {
     const page = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
 <title>已退出登录</title><link rel="stylesheet" href="/css/style.css"></head>
 <body><main class="card" style="max-width:480px;margin:12vh auto">
-<h1>已退出登录</h1><p class="muted">本站与腾讯统一身份认证的会话都已结束。</p>
+<h1>已退出登录</h1><p class="muted">本站与身份认证侧的会话都已结束。</p>
 <p><a class="btn" href="/api/auth/login">重新登录</a> <a href="/">回首页</a></p>
 </main></body></html>`;
     res.writeHead(200, { 'content-type': MIME['.html'], 'cache-control': 'no-store' });
