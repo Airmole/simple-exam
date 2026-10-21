@@ -19,6 +19,15 @@
 
 导入后按下面的「部署到 EdgeOne」补齐构建配置、KV 绑定与环境变量。
 
+## 项目截图
+
+![首页界面](./screenshot/0.png)
+![答题界面](./screenshot/1.png)
+![答题结果](./screenshot/2.png)
+![成绩排名](./screenshot/3.png)
+![管理后台](./screenshot/4.png)
+![答题详情](./screenshot/5.png)
+
 ## 功能一览
 
 | 模块 | 说明 |
