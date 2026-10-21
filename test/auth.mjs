@@ -1,4 +1,4 @@
-import { buildAuthorizeUrl, clientAuthMethods, createFlow, createSession, readSession, isAdmin, normalizeUser, redirectUri, exchangeCode } from '../edge-functions/api/_lib/oidc.js';
+import { buildAuthorizeUrl, buildLogoutUrl, clientAuthMethods, createFlow, createSession, readSession, isAdmin, normalizeUser, redirectUri, exchangeCode } from '../edge-functions/api/_lib/oidc.js';
 import { hmacSign, hmacVerify, encryptJSON, decryptJSON, sha256b64url, b64urlEncode } from '../edge-functions/api/_lib/crypto.js';
 
 let pass = 0, fail = 0;
@@ -190,6 +190,43 @@ console.log('\n[7] 客户端认证方式的兜底');
     check('凭据错误时抛错', /换取 token 失败/.test(err), err);
     check('报错里不含明文密钥', !err.includes('wrong'), err);
     check('凭据错误也试过两种方式', calls.length === 2, `实际 ${calls.length}`);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+console.log('\n[8] 登出地址');
+{
+  const logout = new URL(await buildLogoutUrl(config, {
+    idTokenHint: 'header.payload.sig',
+    postLogoutRedirect: 'https://dji-exam.airmole.cn/',
+  }));
+  // 兜底端点不能落在 OIDC 应用路径下，否则 OneID 回 invalid_request
+  check('兜底端点为 /authz/fclogout', logout.origin + logout.pathname === 'https://oauth2.account.tencent.com/authz/fclogout', logout.toString());
+  check('带 client_id（曾经缺失导致 Missing client_id）', logout.searchParams.get('client_id') === config.oidcClientId, logout.toString());
+  check('带 post_logout_redirect_uri', logout.searchParams.get('post_logout_redirect_uri') === 'https://dji-exam.airmole.cn/');
+  check('带 id_token_hint', logout.searchParams.get('id_token_hint') === 'header.payload.sig');
+
+  const noHint = new URL(await buildLogoutUrl(config, { postLogoutRedirect: 'https://dji-exam.airmole.cn/' }));
+  check('无 id_token_hint 时仍带 client_id', noHint.searchParams.get('client_id') === config.oidcClientId);
+  check('未配 issuer 返回 null', (await buildLogoutUrl({ ...config, oidcIssuer: '' }, {})) === null);
+
+  // well-known 给了 end_session_endpoint 时以它为准
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    issuer: 'https://id.example.com/authz/oidc/v2/app2',
+    authorization_endpoint: 'https://id.example.com/authz/oidc/v2/app2/authorize',
+    token_endpoint: 'https://id.example.com/authz/oidc/v2/app2/token',
+    userinfo_endpoint: 'https://id.example.com/authz/oidc/v2/app2/userinfo',
+    end_session_endpoint: 'https://id.example.com/authz/fclogout',
+  }), { headers: { 'content-type': 'application/json' } });
+  try {
+    const issuer = 'https://id.example.com/authz/oidc/v2/app2';
+    const meta = new URL(await buildAuthorizeUrl(new Request('https://dji-exam.airmole.cn/api/auth/login'), { ...config, oidcIssuer: issuer }, 's', 'c'));
+    check('发现文档已就绪', meta.origin === 'https://id.example.com');
+    const url = new URL(await buildLogoutUrl({ ...config, oidcIssuer: issuer }, { postLogoutRedirect: 'https://dji-exam.airmole.cn/' }));
+    check('优先使用 end_session_endpoint', url.origin + url.pathname === 'https://id.example.com/authz/fclogout', url.toString());
+    check('切换 issuer 后回落到新地址的兜底', !url.searchParams.get('id_token_hint'));
   } finally {
     globalThis.fetch = realFetch;
   }

@@ -133,7 +133,8 @@ async function handleCallback(request, config) {
     }
   }
   const user = normalizeUser(userInfo, idClaims);
-  const sessionToken = await createSession(config.sessionSecret, user);
+  // id_token 只用于登出时作为 id_token_hint，和会话一起加密存着
+  const sessionToken = await createSession(config.sessionSecret, { ...user, idToken: token.id_token || '' });
   const target = flow.returnTo && flow.returnTo.startsWith('/') ? flow.returnTo : '/';
   return withCookies(
     Response.redirect(redirectTo(request, target, config), 302),
@@ -141,15 +142,46 @@ async function handleCallback(request, config) {
   );
 }
 
+// GET 下直接跳 OneID 登出；id_token_hint 太长（或被网关截断）时改用 POST 表单，
+// 表单参数不会出现在 URL 里，长度也不受 query 限制。
+const LOGOUT_SAFE_URL_LIMIT = 2000;
+
+function logoutForm(endpoint, params) {
+  const fields = Object.entries(params)
+    .filter(([, v]) => v)
+    .map(([k, v]) => {
+      const value = String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+      return `<input type="hidden" name="${k}" value="${value}">`;
+    })
+    .join('');
+  const html = `<!doctype html><meta charset="utf-8"><title>正在退出登录…</title>
+<body onload="document.forms[0].submit()"><form method="post" action="${endpoint}">${fields}</form></body>`;
+  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } });
+}
+
 async function handleLogout(request, config) {
   const session = await readSession(request, config.sessionSecret);
   const url = new URL(request.url);
   const postLogout = `${config.siteUrl || url.origin}/`;
-  const logoutUrl = await buildLogoutUrl(config, null, postLogout);
-  return withCookies(
-    Response.redirect(redirectTo(request, logoutUrl || '/', config), 302),
-    cookies.clearSession(request),
-  );
+  const idTokenHint = (session && session.idToken) || '';
+  const logoutUrl = await buildLogoutUrl(config, { idTokenHint, postLogoutRedirect: postLogout });
+  const headers = [cookies.clearSession(request)];
+  if (!logoutUrl) return withCookies(Response.redirect(redirectTo(request, '/', config), 302), headers);
+
+  const target = new URL(logoutUrl);
+  // 落到本站（比如没配 OIDC）时只能走 GET
+  if (target.origin === url.origin) {
+    return withCookies(Response.redirect(redirectTo(request, logoutUrl, config), 302), headers);
+  }
+  if (logoutUrl.length <= LOGOUT_SAFE_URL_LIMIT) {
+    return withCookies(Response.redirect(logoutUrl, 302), headers);
+  }
+  const res = logoutForm(target.origin + target.pathname, {
+    client_id: config.oidcClientId,
+    post_logout_redirect_uri: postLogout,
+    id_token_hint: idTokenHint,
+  });
+  return withCookies(res, headers);
 }
 
 async function handleMe(request, config) {
