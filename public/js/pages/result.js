@@ -2,7 +2,7 @@
 import { api } from '../api.js';
 import { h, fmtDateTime, fmtDuration, notice } from '../util.js';
 import { topbar, errorCard } from '../components.js';
-import { closedNotice, rankingEnabled } from '../site.js';
+import { closedNotice, rankingEnabled, guestAllowed } from '../site.js';
 
 const PAD = (children) => h('div', { class: 'app' }, children);
 
@@ -14,7 +14,9 @@ export async function renderResult({ params, navigate }) {
     return { element: PAD([topbar(), errorCard(e)]), title: '加载失败' };
   }
 
-  if (!meta.user) {
+  // 游客没有账号，成绩只存在当前标签页的 sessionStorage 里，刷新就没了
+  const guest = !meta.user && (meta.guest === true || guestAllowed());
+  if (!meta.user && !guest) {
     return {
       element: PAD([topbar(meta), h('div', { class: 'card' }, [notice('warn', '请登录后查看成绩')])]),
       title: '请先登录',
@@ -23,17 +25,20 @@ export async function renderResult({ params, navigate }) {
 
   let result = readStored(params.recordId);
 
-  if (!result) {
+  // 游客成绩不在 KV 里，取不到就到此为止，别去后台接口白跑一趟
+  if (!result && !guest) {
     // 刷新后本地数据丢失，或管理员从后台点进详情
     try {
       const detail = await api.adminRecord(params.recordId);
       result = fromRecord(detail.record);
     } catch {
-      return notFound(meta, navigate);
+      return notFound(meta, navigate, guest);
     }
   }
 
   const closed = closedNotice();
+  const isGuest = result.guest === true;
+  const guestNotice = '本次为免登录答题，成绩仅在此页面可见，刷新或关闭后不再保留；如需留存成绩与参与排名，请登录后重考。';
   const detailMap = new Map((result.details || []).map((d) => [d.id, d]));
   const questions = result.questions || [];
   const total = result.total || questions.length || (result.details || []).length;
@@ -57,6 +62,7 @@ export async function renderResult({ params, navigate }) {
         ? `恭喜，考试合格！答对 ${result.correctCount} / ${total} 题。`
         : `很遗憾，未达到 ${passScore} 分。答对 ${result.correctCount} / ${total} 题，请重新参加考试。`),
     ]),
+    isGuest ? h('div', { class: 'notice notice-warn mt', text: guestNotice }) : null,
     h('div', { class: 'rules mt' }, [
       statBox('答题开始', fmtDateTime(result.startedAt)),
       statBox('答题结束', fmtDateTime(result.finishedAt)),
@@ -70,7 +76,8 @@ export async function renderResult({ params, navigate }) {
           class: 'btn btn-primary', text: '再考一次',
           onClick: () => { clearStored(params.recordId); navigate('#/exam'); },
         }),
-      rankingEnabled() ? h('button', { class: 'btn', text: '查看成绩排名', onClick: () => navigate('#/ranking') }) : null,
+      // 游客成绩不进排名，这里仅作为浏览入口
+      rankingEnabled() && !isGuest ? h('button', { class: 'btn', text: '查看成绩排名', onClick: () => navigate('#/ranking') }) : null,
       h('button', { class: 'btn', text: '返回首页', onClick: () => navigate('#/') }),
     ]),
   ]);
@@ -115,11 +122,13 @@ function detailItem(q, i, d = {}, { showAnswer = true } = {}) {
   ]);
 }
 
-function notFound(meta, navigate) {
+function notFound(meta, navigate, guest) {
   return {
     element: PAD([topbar(meta), h('div', { class: 'card' }, [
       h('h2', { text: '找不到成绩记录' }),
-      notice('warn', '成绩解析仅在交卷后的当前浏览器会话内可查看。'),
+      notice('warn', guest
+        ? '免登录答题的成绩不会保存，仅在交卷后立即展示一次，刷新后即不可再查看。'
+        : '成绩解析仅在交卷后的当前浏览器会话内可查看。'),
       h('div', { class: 'btn-row mt' }, [
         rankingEnabled() ? h('button', { class: 'btn btn-primary', text: '查看成绩排名', onClick: () => navigate('#/ranking') }) : null,
         h('button', { class: 'btn', text: '返回首页', onClick: () => navigate('#/') }),

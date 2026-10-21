@@ -13,6 +13,8 @@ const QUESTION_COUNT = Number(10);
 const PASS_SCORE = Number(60);
 const PER_QUESTION = Number(10);
 const kv = createMockKV();
+// 用例里会临时替换 fetch（探测 OneID 登出/收尾），这里留个原始引用好还原
+const savedFetch = globalThis.fetch;
 
 // EdgeOne 是把绑定名注入成「全局变量」的，env 里并没有它。
 // 这里照着实情模拟，顺便暴露 config.js 曾经只在 env 上找绑定的 bug。
@@ -523,6 +525,174 @@ console.log('\n[15] 超时交卷被拒');
     check('超时交卷 409 EXAM_TIMEOUT', r.status === 409 && r.json.code === 'EXAM_TIMEOUT', r.text);
     check('超时后试卷被清理', (await lateKv.get(key)) === null);
   } finally {
+    globalThis.EXAM_KV = savedGlobal;
+  }
+}
+
+console.log('\n[16] 游客答题（不登录、即时出分、不落库不入排行）');
+{
+  const guestKv = createMockKV();
+  const savedGlobal = globalThis.EXAM_KV;
+  const savedEnv = { ...ENV };
+  globalThis.EXAM_KV = guestKv;
+
+  try {
+    // 默认关闭：未登录不能开考
+    const denied = await call('POST', '/api/exam/start', { body: {} });
+    check('未开启游客模式时未登录 401', denied.status === 401, denied.text);
+
+    ENV.EXAM_ALLOW_GUEST = 'true';
+    const meta = await call('GET', '/api/meta');
+    check('meta 标记 guest=true', meta.json.guest === true, meta.text);
+    check('规则里下发 allowGuest', meta.json.rules.allowGuest === true, meta.text);
+    check('站点配置同步 allowGuest', meta.json.site.allowGuest === true, meta.text);
+
+    const start = await call('POST', '/api/exam/start', { body: {} });
+    check('游客可开考', start.status === 200, start.text);
+    check('服务端签发 guestId', typeof start.json.guestId === 'string' && start.json.guestId.length > 0, start.text);
+    check('标记本次为游客试卷', start.json.guest === true);
+    const gid = start.json.guestId;
+    const qs = start.json.questions;
+    check(`游客抽 ${QUESTION_COUNT} 题`, qs.length === QUESTION_COUNT, String(qs.length));
+    check('游客题目不含答案', qs.every((q) => q.answer === undefined));
+
+    // 取卷也认 gid
+    const paperBack = await call('GET', `/api/exam/questions?guestId=${encodeURIComponent(gid)}`);
+    check('游客可用 guestId 取回试卷', paperBack.status === 200 && paperBack.json.total === QUESTION_COUNT, paperBack.text);
+
+    const before = guestKv.store.size;
+    const answers = {};
+    qs.forEach((q) => { answers[q.id] = answerOf(q.id); });
+    const submit = await call('POST', '/api/exam/submit', { body: { answers, guestId: gid } });
+    check('游客交卷即出分', submit.status === 200 && submit.json.score === QUESTION_COUNT * PER_QUESTION, submit.text);
+    check('游客结果标记 guest', submit.json.guest === true);
+    check('游客结果不落库（persisted=false）', submit.json.persisted === false);
+    check('游客无 recordId', submit.json.recordId === null, JSON.stringify(submit.json.recordId));
+    check('游客交卷后无残留记录', guestKv.store.size === before - 1, `${before} -> ${guestKv.store.size}`);
+    check('游客不产生答题记录/用户索引',
+      [...guestKv.store.keys()].every((k) => !k.startsWith('exam_record_') && !k.startsWith('exam_user_')),
+      [...guestKv.store.keys()].join(','));
+    check('游客不计入统计', !guestKv.store.has('exam_stats'));
+
+    const ranking = await call('GET', '/api/ranking');
+    check('游客不进排名', ranking.status === 200 && ranking.json.ranking.length === 0, ranking.text);
+
+    // 交卷后试卷清掉，同一 gid 不能重刷
+    const replay = await call('POST', '/api/exam/submit', { body: { answers, guestId: gid } });
+    check('同一 guestId 不能重复交卷', replay.status === 409, replay.text);
+
+    // 没有试卷凭据时不认，避免绕过抽题直接刷分
+    const forge = await call('POST', '/api/exam/submit', { body: { answers, questionIds: qs.map((q) => q.id) } });
+    check('游客无试卷不能直接交卷', forge.status === 409, forge.text);
+
+    // 截止时间对游客同样生效
+    ENV.EXAM_DEADLINE = '2020-01-01 00:00';
+    const closed = await call('POST', '/api/exam/start', { body: {} });
+    check('截止后游客同样被拒（403）', closed.status === 403 && closed.json.code === 'EXAM_CLOSED', closed.text);
+    delete ENV.EXAM_DEADLINE;
+
+    // 关闭开关后立刻恢复「必须登录」
+    delete ENV.EXAM_ALLOW_GUEST;
+    const off = await call('POST', '/api/exam/start', { body: {} });
+    check('关闭游客模式后未登录 401', off.status === 401, off.text);
+    const offMe = await call('GET', '/api/auth/me');
+    check('me 里 guest=false', offMe.json.guest === false, offMe.text);
+  } finally {
+    Object.keys(ENV).forEach((k) => { if (!(k in savedEnv)) delete ENV[k]; });
+    Object.assign(ENV, savedEnv);
+    globalThis.EXAM_KV = savedGlobal;
+  }
+}
+
+console.log('\n[17] 管理后台密码登录（不依赖 OneID）');
+{
+  const pwdKv = createMockKV();
+  const savedGlobal = globalThis.EXAM_KV;
+  const savedEnv = { ...ENV };
+  globalThis.EXAM_KV = pwdKv;
+
+  const cookieFrom = (res) => String(res.headers.getSetCookie ? res.headers.getSetCookie().join(';') : res.headers.get('set-cookie') || '');
+
+  try {
+    // 未配置密码时该入口不可用
+    const noPwd = await call('POST', '/api/auth/admin-login', { body: { password: 'whatever' } });
+    check('未配置 ADMIN_PASSWORD 时 403', noPwd.status === 403 && noPwd.json.code === 'ADMIN_PASSWORD_DISABLED', noPwd.text);
+    const noPwdSite = await call('GET', '/api/site');
+    check('未配置时不下发密码登录入口', noPwdSite.json.adminPasswordLogin === false, noPwdSite.text);
+
+    ENV.ADMIN_PASSWORD = 'exam-secret-2026';
+    const site = await call('GET', '/api/site');
+    check('配置后 /api/site 下发密码登录入口', site.json.adminPasswordLogin === true, site.text);
+
+    const wrong = await call('POST', '/api/auth/admin-login', { body: { password: 'nope' } });
+    check('密码错误 401', wrong.status === 401 && wrong.json.code === 'ADMIN_PASSWORD_INVALID', wrong.text);
+    check('密码错误不下发会话', !cookieFrom(wrong).includes('exam_admin='), cookieFrom(wrong));
+
+    const okLogin = await call('POST', '/api/auth/admin-login', { body: { password: 'exam-secret-2026' } });
+    check('密码正确 200', okLogin.status === 200 && okLogin.json.isAdmin === true, okLogin.text);
+    const adminCookie = (cookieFrom(okLogin).match(/exam_admin=[^;]+/) || [''])[0];
+    check('下发 exam_admin cookie', !!adminCookie, cookieFrom(okLogin));
+    check('后台 cookie 是 HttpOnly', /HttpOnly/i.test(cookieFrom(okLogin)), cookieFrom(okLogin));
+
+    const stats = await call('GET', '/api/admin/stats', { cookie: adminCookie });
+    check('密码会话可访问统计', stats.status === 200 && stats.json.isAdmin === true, stats.text);
+    const records = await call('GET', '/api/admin/records', { cookie: adminCookie });
+    check('密码会话可访问记录列表', records.status === 200, records.text);
+
+    const meta = await call('GET', '/api/meta', { cookie: adminCookie });
+    check('meta 里 isAdmin=true / adminVia=password', meta.json.isAdmin === true && meta.json.adminVia === 'password', meta.text);
+    check('密码会话不算登录用户（guest 由开关决定）', meta.json.user === null && meta.json.guest === false, meta.text);
+
+    // 密码会话不能拿来答题：没有用户身份，也没有用户索引
+    const examStart = await call('POST', '/api/exam/start', { cookie: adminCookie, body: {} });
+    check('密码会话不能开考（非登录用户）', examStart.status === 401, examStart.text);
+
+    // 未登录仍进不去后台
+    const anon = await call('GET', '/api/admin/stats');
+    check('无 cookie 仍 401', anon.status === 401, anon.text);
+
+    // 伪造的 cookie 不认（签名校验）
+    const forged = await call('GET', '/api/admin/stats', { cookie: 'exam_admin=abc.def' });
+    check('伪造后台 cookie 401', forged.status === 401, forged.text);
+
+    // 登出后台
+    const out = await call('GET', '/api/auth/admin-logout', { cookie: adminCookie });
+    check('后台登出清除 cookie', /exam_admin=;/.test(cookieFrom(out)), cookieFrom(out));
+
+    // OneID 白名单用户仍然可用（两条路并存）
+    const savedAdminUsers = ENV.ADMIN_USERS;
+    ENV.ADMIN_USERS = 'admin@corp.com';
+    globalThis.fetch = async () => new Response(null, { status: 302, headers: { location: 'http://127.0.0.1:8787/' } });
+    try {
+      const oidcStats = await call('GET', '/api/admin/stats', { cookie: await sessionCookie(adminUser) });
+      check('OneID 白名单仍可进后台', oidcStats.status === 200, oidcStats.text);
+    } finally {
+      globalThis.fetch = savedFetch;
+      ENV.ADMIN_USERS = savedAdminUsers;
+    }
+
+    // 连续试错会锁
+    const { getConfig } = await import('../edge-functions/api/_lib/config.js');
+    check('密码不足 6 位视为未配置', getConfig({ ADMIN_PASSWORD: '12345' }).adminPasswordEnabled === false);
+    check('ADMIN_PASSWORD_LOGIN=false 可整体关掉', getConfig({ ADMIN_PASSWORD: 'exam-secret-2026', ADMIN_PASSWORD_LOGIN: 'false' }).adminPasswordEnabled === false);
+    const shortPwd = getConfig({ ADMIN_PASSWORD: '12345' });
+    check('密码过短时 /api/site 也不下发入口', shortPwd.adminPasswordEnabled === false);
+
+    const ips = { 'x-forwarded-for': '203.0.113.9' };
+    let locked = null;
+    for (let i = 0; i < 5; i++) {
+      locked = await call('POST', '/api/auth/admin-login', { body: { password: 'bad' }, headers: ips });
+    }
+    check('连续 5 次错误后仍在 401', locked.status === 401, locked.text);
+    const blocked = await call('POST', '/api/auth/admin-login', { body: { password: 'exam-secret-2026' }, headers: ips });
+    check('超限后即使密码正确也拒绝（429）', blocked.status === 429 && blocked.json.code === 'ADMIN_LOGIN_LOCKED', blocked.text);
+    const otherIp = await call('POST', '/api/auth/admin-login', {
+      body: { password: 'exam-secret-2026' }, headers: { 'x-forwarded-for': '198.51.100.7' },
+    });
+    check('锁定按来源 IP 隔离', otherIp.status === 200, otherIp.text);
+  } finally {
+    Object.keys(ENV).forEach((k) => { if (!(k in savedEnv)) delete ENV[k]; });
+    Object.assign(ENV, savedEnv);
     globalThis.EXAM_KV = savedGlobal;
   }
 }

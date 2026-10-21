@@ -5,8 +5,10 @@ import { b64urlDecode, decryptJSON, encryptJSON, hmacSign, hmacVerify, randomStr
 
 const SESSION_COOKIE = 'exam_session';
 const FLOW_COOKIE = 'exam_oidc_flow';
+const ADMIN_COOKIE = 'exam_admin';
 const SESSION_TTL_SECONDS = 60 * 60 * 8; // 8 小时
 const FLOW_TTL_SECONDS = 60 * 10; // 10 分钟
+const ADMIN_TTL_SECONDS = 60 * 60 * 4; // 密码登录的后台会话 4 小时
 
 let discoveryCache = null;
 
@@ -48,6 +50,7 @@ function cookie(name, value, { maxAge, request, path = '/' } = {}) {
 export const cookies = {
   sessionName: SESSION_COOKIE,
   flowName: FLOW_COOKIE,
+  adminName: ADMIN_COOKIE,
   read: parseCookies,
   setSession(request, token) {
     return cookie(SESSION_COOKIE, token, { maxAge: SESSION_TTL_SECONDS, request });
@@ -60,6 +63,12 @@ export const cookies = {
   },
   clearFlow(request) {
     return cookie(FLOW_COOKIE, '', { maxAge: 0, request });
+  },
+  setAdmin(request, token) {
+    return cookie(ADMIN_COOKIE, token, { maxAge: ADMIN_TTL_SECONDS, request });
+  },
+  clearAdmin(request) {
+    return cookie(ADMIN_COOKIE, '', { maxAge: 0, request });
   },
 };
 
@@ -270,6 +279,41 @@ export async function logoutAccepted(logoutUrl) {
   } catch {
     return true;
   }
+}
+
+/* ---------- 密码登录的后台会话 ---------- */
+
+// 不和 OneID 会话混在一起：退出登录不该顺手把人踢出后台，反之亦然。
+export const ADMIN_SESSION_SECONDS = ADMIN_TTL_SECONDS;
+
+export async function createAdminSession(secret) {
+  const payload = await encryptJSON({ kind: 'admin', iat: Date.now(), exp: Date.now() + ADMIN_TTL_SECONDS * 1000 }, secret);
+  return `${payload}.${await hmacSign(payload, secret)}`;
+}
+
+export async function readAdminSession(request, secret) {
+  const token = parseCookies(request)[ADMIN_COOKIE];
+  if (!token) return null;
+  const idx = token.lastIndexOf('.');
+  if (idx < 0) return null;
+  const payload = token.slice(0, idx);
+  if (!(await hmacVerify(payload, token.slice(idx + 1), secret))) return null;
+  const body = await decryptJSON(payload, secret);
+  if (!body || body.kind !== 'admin' || !body.exp || body.exp < Date.now()) return null;
+  return body;
+}
+
+/**
+ * 定长比较，别让响应时间泄漏密码前缀。
+ * 先各自 SHA-256 再逐字节比，长度不同也就自然摊平了。
+ */
+export async function verifyAdminPassword(input, expected) {
+  if (!expected) return false;
+  const a = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(input ?? ''))));
+  const b = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(expected))));
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
 }
 
 export function normalizeUser(userInfo, idClaims) {
