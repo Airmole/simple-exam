@@ -11,7 +11,7 @@
 
 ## 一键部署
 
-<a href="https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2FAirmole%2Fsimple-exam&output-directory=public&root-directory=.%2F" target="_blank">
+<a href="https://edgeone.ai/pages/new?repository-url=https%3A%2F%2Fgithub.com%2FAirmole%2Fsimple-exam&output-directory=.%2Fpublic&root-directory=.%2F" target="_blank">
   <img src="https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg" alt="使用 EdgeOne Pages 部署" height="32">
 </a>
 
