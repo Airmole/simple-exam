@@ -147,20 +147,25 @@ async function handleMockOidc(req, res) {
     return json(res, user);
   }
   if (url.pathname === '/mock-oidc/fclogout') {
-    // 照真 OneID 的脾气：缺 client_id 一律 invalid_request（线上就是这么白屏的）
-    let params = url.searchParams;
-    if (req.method === 'POST') {
-      let body = '';
-      for await (const chunk of req) body += chunk;
-      params = new URLSearchParams(body);
+    // 照真 OneID 的脾气：只收 GET，缺 client_id 或者回跳地址对不上都回 invalid_request
+    if (req.method !== 'GET') {
+      res.writeHead(405);
+      return res.end();
     }
+    const params = url.searchParams;
     if (!params.get('client_id')) {
       return json(res, {
         error: 'invalid_request',
         error_description: 'Missing client_id',
       }, 400);
     }
-    res.writeHead(302, { location: params.get('post_logout_redirect_uri') || '/' });
+    if (params.get('post_logout_redirect_uri') !== `${ORIGIN}/`) {
+      return json(res, {
+        error: 'invalid_request',
+        error_description: `Invalid post_logout_redirect_uri (${params.get('post_logout_redirect_uri')})`,
+      }, 400);
+    }
+    res.writeHead(302, { location: params.get('post_logout_redirect_uri') });
     return res.end();
   }
   res.writeHead(404);

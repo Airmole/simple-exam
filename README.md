@@ -149,7 +149,7 @@ https://dji-exam.airmole.cn/api/auth/callback
 | --- | --- | --- |
 | GET | `/api/auth/login?returnTo=` | 跳转 OneID 授权 |
 | GET | `/api/auth/callback` | 授权回调，换取用户信息并建会话 |
-| GET | `/api/auth/logout` | 清除会话并跳转 OneID `/authz/fclogout`（带 `client_id`、`post_logout_redirect_uri`、`id_token_hint`；URL 过长时改为自动提交的 POST 表单） |
+| GET | `/api/auth/logout` | 清除会话并跳转 OneID `<issuer>/fclogout`（带 `client_id`、`post_logout_redirect_uri`、`id_token_hint`） |
 | GET | `/api/auth/me` | 当前登录态、是否管理员、考试规则 |
 | GET | `/api/meta` | 站点信息（题库总量、规则、登录态） |
 | GET | `/api/exam/rules` | 考试规则 |

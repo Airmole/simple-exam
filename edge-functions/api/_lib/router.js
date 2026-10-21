@@ -142,46 +142,18 @@ async function handleCallback(request, config) {
   );
 }
 
-// GET 下直接跳 OneID 登出；id_token_hint 太长（或被网关截断）时改用 POST 表单，
-// 表单参数不会出现在 URL 里，长度也不受 query 限制。
-const LOGOUT_SAFE_URL_LIMIT = 2000;
-
-function logoutForm(endpoint, params) {
-  const fields = Object.entries(params)
-    .filter(([, v]) => v)
-    .map(([k, v]) => {
-      const value = String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
-      return `<input type="hidden" name="${k}" value="${value}">`;
-    })
-    .join('');
-  const html = `<!doctype html><meta charset="utf-8"><title>正在退出登录…</title>
-<body onload="document.forms[0].submit()"><form method="post" action="${endpoint}">${fields}</form></body>`;
-  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } });
-}
-
+// 登出：先在自己这里清掉会话 cookie，再 302 到 OneID 的 fclogout。
+// 不用 POST 表单：OneID 的 fclogout 只收 GET，405 之外还可能被网关 WAF 拦成 501。
+// id_token 上千字符，URL 可能超长被截断，所以在自己这一跳把 cookie 清掉，
+// 即便 OneID 那边走不完，本站也已经退出，不会卡在「点登出还是登录态」。
 async function handleLogout(request, config) {
   const session = await readSession(request, config.sessionSecret);
   const url = new URL(request.url);
   const postLogout = `${config.siteUrl || url.origin}/`;
   const idTokenHint = (session && session.idToken) || '';
   const logoutUrl = await buildLogoutUrl(config, { idTokenHint, postLogoutRedirect: postLogout });
-  const headers = [cookies.clearSession(request)];
-  if (!logoutUrl) return withCookies(Response.redirect(redirectTo(request, '/', config), 302), headers);
-
-  const target = new URL(logoutUrl);
-  // 落到本站（比如没配 OIDC）时只能走 GET
-  if (target.origin === url.origin) {
-    return withCookies(Response.redirect(redirectTo(request, logoutUrl, config), 302), headers);
-  }
-  if (logoutUrl.length <= LOGOUT_SAFE_URL_LIMIT) {
-    return withCookies(Response.redirect(logoutUrl, 302), headers);
-  }
-  const res = logoutForm(target.origin + target.pathname, {
-    client_id: config.oidcClientId,
-    post_logout_redirect_uri: postLogout,
-    id_token_hint: idTokenHint,
-  });
-  return withCookies(res, headers);
+  const target = logoutUrl || redirectTo(request, '/', config);
+  return withCookies(Response.redirect(target, 302), cookies.clearSession(request));
 }
 
 async function handleMe(request, config) {
