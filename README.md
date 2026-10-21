@@ -1,61 +1,109 @@
-# 大疆机场 4 认证考试系统
+# 通用单选题考试系统
 
-一个部署在腾讯云 EdgeOne（Makers / Pages）上的 Web 考试系统：
+一套开箱即用的在线单选题考试系统，部署在腾讯云 EdgeOne（Pages / Makers）上：
 
-- 登录：腾讯统一身份认证 OneID（OIDC 授权码 + PKCE）
-- 后端：EdgeOne **Edge Functions**（`/edge-functions` 目录，Edge Runtime）
-- 存储：EdgeOne **KV 存储**
-- 前端：原生 HTML/CSS/JS，无构建步骤，构建时直接作为静态资源输出
+- 前端：原生 HTML/CSS/JS，无构建步骤，静态资源直接托管
+- 后端：EdgeOne **Edge Functions**（`edge-functions/`，Edge Runtime）
+- 存储：EdgeOne **KV 存储**（成绩、排名、统计）
+- 题库：一个 JSON 文件，改完即用
+- 登录：可选接入腾讯统一身份认证 OneID（OIDC 授权码 + PKCE）
+
+## 一键部署
+
+<a href="https://edgeone.ai/pages/new?from=github&template=https://github.com/Airmole/simple-exam" target="_blank">
+  <img src="https://cdnstatic.tencentcs.com/edgeone/pages/deploy.svg" alt="使用 EdgeOne Pages 部署" height="32">
+</a>
+
+点上面的按钮，把本仓库导入自己的 EdgeOne Pages 项目。
+
+> 部署按钮的格式与参数说明见官方文档：[部署按钮](https://pages.edgeone.ai/zh/document/deploy-button)。
+> 若你的仓库地址不是 `Airmole/simple-exam`，把上面链接里的 `template` 参数换成自己的仓库地址即可
+> （GitHub 用完整仓库 URL，其他平台可用对应导入地址）。
+
+导入后按下面的「部署到 EdgeOne」补齐构建配置、KV 绑定与环境变量。
 
 ## 功能一览
 
 | 模块 | 说明 |
 | --- | --- |
-| 登录认证 | OneID OIDC 授权码 + PKCE，会话用 AES-GCM 加密 + HMAC 签名的 HttpOnly Cookie |
-| 考试规则 | 开始前展示题目数、每题分数、满分、及格分、时长；有后台权限才显示入口 |
-| 考试截止 | 截止后隐藏所有开始考试的入口（首页、排名页、成绩页、答题页），提示已到截止时间 |
-| 答题过程 | 实时显示开始时间、已用时长、剩余时长、已答题数、剩余题目、当前题的原题号；答题卡可跳转 |
-| 交卷判分 | 服务端判分（正确答案不下发前端），满分 100，80 分合格；不合格提示重考 |
-| 成绩记录 | 姓名、开始/结束时间、用时、逐题作答（题目 + 正确答案 + 用户答案） |
-| 成绩排名 | 全员可看；同一用户取最高分，同分用时短者靠前 |
-| 管理后台 | 仅白名单用户可访问；考试人数、次数、合格率、平均分、最高/最低分、最快/最慢答题，以及答题记录与详情 |
+| 题库 | `data/questions.json` 里写题目，改完重新部署即生效；启动时校验格式，写错会在接口里直接报出第几题 |
+| 抽题 | 从题库随机抽取 N 道，每人每场题目不同、顺序不同 |
+| 答题 | 单选，支持答题卡跳转、上一题/下一题、清除选择；作答本地暂存，误刷新可恢复 |
+| 考试控制 | 时长倒计时、到点自动交卷；每人限考次数；截止时间统一收起所有入口 |
+| 判分 | 服务端判分，正确答案不下发前端；交卷后立即出分 |
+| 成绩 | 分数、是否合格、用时、逐题作答；可按开关决定是否公开正确答案 |
+| 排名 | 同一用户取最高分，同分用时短者靠前；可整体关闭 |
+| 管理后台 | 白名单用户可看考试人数/次数/合格率/平均分/最高最低分，以及每条答题记录详情 |
+| 品牌 | 站点名、Logo 文字、主题色都能用环境变量改，不用改代码 |
 
 ## 目录结构
 
 ```
-data/questions.json            # 题库（100 题）
+data/
+  questions.json               # 题库（当前生效的题库）
+  questions.example.json       # 示例题库，换题时可直接覆盖到 questions.json
 public/                        # 静态前端（构建输出目录）
   index.html
+  logout-done.html             # 登出回跳落地页
   css/style.css
-  js/{app,api,util,components,config}.js
+  js/app.js                    # hash 路由
+  js/site.js                   # 站点配置（品牌、主题色、截止时间）与缓存
+  js/api.js  js/util.js  js/components.js
   js/pages/{home,exam,result,ranking,admin}.js
 edge-functions/
   api/[[default]].js           # 统一入口，/api/* 全走这里
   api/_lib/
     router.js                  # 路由分发
-    oidc.js                    # OneID OIDC 客户端与会话
-    crypto.js                  # Web Crypto 工具
-    config.js                  # 环境变量读取
-    questions.js               # 题库与随机抽题
-    scoring.js                 # 判分
+    config.js                  # 环境变量读取、截止时间解析、KV 绑定
+    questions.js               # 题库加载、校验与随机抽题
+    question-bank.js           # 题库的 JS 副本（无法导入 JSON 时的兜底）
+    scoring.js                 # 判分与单选作答归一化
     store.js                   # KV 数据模型、key 规范与统计
-    http.js                    # 响应工具
-test/                          # 本地测试（不入生产构建）
+    oidc.js  crypto.js  http.js
+test/                          # 本地测试与开发服务器（不参与生产构建）
   run.mjs                      # 接口集成测试
+  bank.mjs                     # 题库解析、抽题与判分单元测试
   auth.mjs                     # 认证与加密单元测试
   dev-server.mjs               # 本地开发服务器（含 mock OIDC）
   mock-kv.js                   # 内存 KV
 ```
 
+## 换题库：改一个 JSON 就行
+
+`data/questions.json` 是一个数组，每题四个字段：
+
+```json
+[
+  {
+    "id": 1,
+    "question": "TCP 三次握手的第二个报文携带哪个标志位？",
+    "options": { "A": "SYN", "B": "SYN + ACK", "C": "ACK", "D": "FIN" },
+    "answer": "B"
+  }
+]
+```
+
+规则：
+
+- `question` 必填，纯文本
+- `options` 至少 2 项，键建议用 `A`/`B`/`C`/`D`（最多支持到 `H`），按字母顺序展示
+- `answer` 必须是 `options` 里的某个键（大小写不敏感，统一按大写处理）
+- `id` 是判分与成绩解析的锚点，题目之间不能重复；不填会按顺序自动补
+
+改完 `data/questions.json` 后有两种落地方式：
+
+1. 重新部署一次（数据文件会随函数一起打包，最稳妥）；
+2. 同时把内容同步到 `edge-functions/api/_lib/question-bank.js`（`export const QUESTION_BANK = [...]`），
+   它是运行时导不了 JSON 时的兜底来源。
+
+题库写错不用等交卷：`/api/exam/rules`、`/api/meta` 会直接返回「第 3 题至少需要 2 个选项」这类提示。
+`test/bank.mjs` 也会在本地就先报出来。
+
 ## 部署到 EdgeOne
 
-### 1. 开通 KV 并创建命名空间
+### 1. 创建 Makers 项目
 
-控制台 → **Pages → 存储 → KV 存储** → 申请开通账户 → 创建命名空间（免费版 1GB）。
-
-### 2. 创建 Makers 项目
-
-导入本仓库，构建配置：
+导入自己的仓库，构建配置：
 
 | 项 | 值 |
 | --- | --- |
@@ -63,112 +111,142 @@ test/                          # 本地测试（不入生产构建）
 | 构建命令 | 留空（无构建步骤） |
 | 输出目录 | `public` |
 
-### 3. 绑定 KV 命名空间
+### 2. 开通 KV 并绑定
+
+控制台 → **Pages → 存储 → KV 存储** → 开通账户 → 创建命名空间（免费版 1GB）。
 
 项目设置 → **KV 存储** → 绑定命名空间，**变量名填 `EXAM_KV`**（与 `KV_BINDING` 一致）。
 
 > 绑定名不是环境变量：EdgeOne 会把它注入成运行时**全局变量**，函数里直接 `EXAM_KV.get(...)` 访问，
 > 不在 `context.env` 上。`getKV()` 优先读全局，其次兼容 `env[绑定名]`。
 
-### 1.1 排查「未找到 KV 绑定」
+排查「未找到 KV 绑定」：
 
-按顺序看：
+1. 绑定是不是加在**这个**项目上（同名项目容易点错），且变量名与 `KV_BINDING` 完全一致（大小写敏感）；
+2. 绑定是在**当前生效的那次部署之后**才加的 —— 在「部署」里对最新提交重新构建一次；
+3. 看接口返回：`503 { code: "KV_BINDING_MISSING", binding: "EXAM_KV", error: "..." }`，
+   `error` 里带上运行时实际读到的同名值类型，能区分「没读到」和「读到了但不是 KV 对象」。
 
-1. 绑定是不是加在**这个**项目上（同名项目容易点错），且变量名与 `KV_BINDING` 完全一致（大小写敏感）。
-2. 绑定是在**当前生效的那次部署之后**才加的 —— 在「部署」里对最新提交重新构建一次，函数才会拿到新绑定。
-3. 看接口返回：`/api/*` 现在会返回 `503 { code: "KV_BINDING_MISSING", binding: "EXAM_KV", error: "..." }`，
-   `error` 里会带上运行时实际读到的同名值类型，能区分「没读到」和「读到了但不是 KV 对象」。
+### 3. 配置环境变量
 
-### 4. 配置环境变量
-
-项目设置 → 环境变量，按 `.env.example` 填写，关键几项：
+项目设置 → 环境变量，按 `.env.example` 填。最小可用的一组：
 
 ```
-SITE_URL=https://dji-exam.airmole.cn
-OIDC_ISSUER=https://oauth2.account.tencent.com/authz/oidc/v2/1492474500942414067
+SITE_URL=https://exam.example.com
+SITE_NAME=通用单选题考试系统
+SITE_LOGO=考
+BRAND_COLOR=#0f5fff
+EXAM_QUESTION_COUNT=10
+EXAM_POINTS_PER_QUESTION=10
+EXAM_PASS_SCORE=60
+EXAM_DURATION_MINUTES=30
+ADMIN_USERS=admin@example.com
+```
+
+> 改完环境变量要**重新部署**一次，边缘函数不会自动读取新值。
+
+### 4. 绑定域名
+
+把 `exam.example.com`（换成自己的域名）解析到 Makers 项目并绑定证书。
+`SITE_URL` 必须与最终访问域名完全一致（含协议、不带结尾斜杠），否则登录回调的域名校验会失败。
+
+### 5. 接入统一身份认证（可选）
+
+如果需要「先登录再考试」，在 OneID 侧登记两个地址，并配置对应环境变量：
+
+| 用途 | 登记地址 | 环境变量 |
+| --- | --- | --- |
+| 登录回调 | `https://exam.example.com/api/auth/callback` | 由 `SITE_URL` 自动拼接 |
+| 登出回跳 | `https://exam.example.com/logout-done` | `OIDC_LOGOUT_REDIRECT_URI` |
+
+```
+OIDC_ISSUER=https://oauth2.account.tencent.com/authz/oidc/v2/<应用ID>
 OIDC_CLIENT_ID=<客户端ID>
 OIDC_CLIENT_SECRET=<客户端密钥>
+OIDC_LOGOUT_REDIRECT_URI=https://exam.example.com/logout-done
 SESSION_SECRET=<openssl rand -hex 32>
-ADMIN_USERS=admin@corp.com,zhangsan
-EXAM_DURATION_MINUTES=60
 ```
 
-### 4.1 若回调停留在 `invalid_client`
+本地调试时把回调地址换成 `http://127.0.0.1:8787/api/auth/callback`。
 
-`/api/auth/callback` 返回 `换取 token 失败: 400 invalid_client` 说明 OneID 没认下客户端凭据。
-token 请求默认先发 `client_secret_basic`（RFC 6749 §2.3.1：先 urlencode 再 base64），
-拿到 `invalid_client` 会自动改用 `client_secret_post` 重试一次；两种都失败才会报错，
-错误信息里会注明试过哪几种方式。
+回调停在 `invalid_client`：
 
-排错顺序：
+- `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` 是否与 OneID 应用配置完全一致（多余空格也算不一致）；
+- 密钥含非 ASCII 字符时 `Basic` 头承载不了，把 `OIDC_CLIENT_AUTH_METHOD` 设为 `post`；
+- 改完配置要重新部署。
 
-1. `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` 是否与 OneID 应用配置完全一致（多余空格也算不一致）。
-2. 密钥里若有非 ASCII 字符（中文等），`Basic` 头承载不了，把 `OIDC_CLIENT_AUTH_METHOD` 设为 `post`。
-3. 改完配置后对最新提交**重新部署**，边缘函数不会自动读取新的环境变量。
-
-### 5. 在 OneID 侧登记回调地址
-
-在腾讯统一身份认证的应用配置里，把回调地址设为：
-
-```
-https://dji-exam.airmole.cn/api/auth/callback
-```
-
-（本地调试时改为 `http://127.0.0.1:8787/api/auth/callback`）
-
-同一页往下找「登出回跳地址 / 退出登录回调 / post_logout_redirect_uri」，
-登记 `https://dji-exam.airmole.cn/logout-done`（或站点首页），
-并把该地址填进 `OIDC_LOGOUT_REDIRECT_URI`。
-
-OneID 只认登记过的回跳地址，没登记就回 `invalid_request: Invalid post_logout_redirect_uri`。
-登出时我们会先探一次：受理了才让浏览器去 OneID，被拒就直接回站点首页——
-此时本站会话已清，再点登录会重新走授权，不会停在报错 JSON 上。
-
-### 6. 绑定域名
-
-把 `dji-exam.airmole.cn` 解析到 Makers 项目；`SITE_URL` 必须与之一致，否则回调域名校验会失败。
+登出被拒（`Invalid post_logout_redirect_uri`）时本站会自动退回首页：会话已经清掉，
+再点登录会重新走授权，不会停在报错 JSON 上。
 
 ## 环境变量
 
+### 站点
+
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `SITE_URL` | 请求 origin | 站点地址，用于拼接回调与登出跳转 |
+| `SITE_URL` | 请求 origin | 站点地址，用于拼接登录回调与登出跳转；填的不是 `http(s)://` 绝对地址时按未配置处理 |
+| `SITE_NAME` | `通用单选题考试系统` | 站点名称，显示在浏览器标题、顶部导航与首页标题 |
+| `SITE_LOGO` | `Q` | Logo 文字，1~2 个字符 |
+| `BRAND_COLOR` | `#0f5fff` | 主题色（十六进制），按钮、链接、Logo 一并跟随；非法值回退默认 |
+
+### 考试规则
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `EXAM_QUESTION_COUNT` | `10` | 每场抽题数量；题库不足时按题库实际数量出卷，满分随之变化 |
+| `EXAM_POINTS_PER_QUESTION` | `10` | 每题分值，满分 = 抽题数量 × 每题分值 |
+| `EXAM_PASS_SCORE` | `60` | 及格分 |
+| `EXAM_DURATION_MINUTES` | `30` | 考试时长（分钟），到点自动交卷 |
+| `EXAM_MAX_ATTEMPTS` | `0` | 每人最多考试次数，`0` 或留空为不限 |
+| `EXAM_DEADLINE` | 空 | 截止时间，**按北京时间（UTC+8）**解析，如 `2026-12-31 23:59`；留空不限。截止后前端隐藏所有开考入口，服务端拒绝开考 |
+
+### 展示与留存开关
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `EXAM_SHOW_RANKING` | `true` | 是否公开成绩排名；`false` 时隐藏入口且 `/api/ranking` 返回 403 |
+| `EXAM_SHOW_ANSWER` | `true` | 交卷后是否展示正确答案与逐题对错；`false` 时只给分数和你的作答（管理端详情同样裁剪） |
+| `EXAM_KEEP_RECORDS` | `true` | 是否把答题记录写入 KV；`false` 时不落库、不参与排名，成绩只在交卷响应里返回 |
+
+开关取值：`true`/`1`/`on`/`yes` 为开，`false`/`0`/`off`/`no` 为关，留空取默认。
+
+> 上述规则与开关都通过 `/api/site`、`/api/meta` 下发给前端，**不需要改前端代码或重新构建静态资源**。
+
+### 认证与管理
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
 | `OIDC_ISSUER` | — | OneID issuer |
 | `OIDC_CLIENT_ID` | — | 客户端 ID |
 | `OIDC_CLIENT_SECRET` | — | 客户端密钥 |
-| `OIDC_CLIENT_AUTH_METHOD` | 空（先 `basic` 再 `post`） | 客户端认证方式。`basic` 走 `Authorization` 头，`post` 把凭据放表单；凭据非 ASCII 或反代改写 header 时用 `post` |
+| `OIDC_CLIENT_AUTH_METHOD` | 空（先 `basic` 再 `post`） | 客户端认证方式 |
 | `OIDC_SCOPES` | `openid profile` | 申请 scope |
-| `OIDC_LOGOUT_REDIRECT_URI` | 空（回站点首页） | 登出后回跳地址，**必须是 OneID 应用里登记过的那个**，例如 `https://dji-exam.airmole.cn/logout-done` |
+| `OIDC_LOGOUT_REDIRECT_URI` | 空（回站点首页） | 登出后回跳地址，必须是 OneID 里登记过的那个 |
 | `SESSION_SECRET` | 回退用 client secret | 会话签名/加密密钥，建议单独配置 |
-| `EXAM_QUESTION_COUNT` | `50` | 抽题数量 |
-| `EXAM_POINTS_PER_QUESTION` | `2` | 每题分值 |
-| `EXAM_PASS_SCORE` | `80` | 及格分 |
-| `EXAM_DURATION_MINUTES` | `60` | 考试时长（分钟） |
-| `ADMIN_USERS` | 空 | 管理后台白名单，逗号分隔 |
-| `KV_BINDING` | `EXAM_KV` | KV 绑定的运行时变量名（控制台「KV 存储 → 绑定命名空间」里填的名字） |
-
-> 考试截止时间在前端配置：`public/js/config.js` 里的 `DEADLINE`（本地时间，如 `2026-01-31 23:59`）。
-> 留空表示不限；填一个过去的时间即进入截止状态，页面会隐藏所有开始考试入口并统一提示，无需重新部署后端。
-
-> `ADMIN_USERS` 支持填 OneID 的 `preferred_username`、`email`、`mobile` 或 `sub`，匹配时忽略大小写。
+| `ADMIN_USERS` | 空 | 管理后台白名单，逗号分隔，匹配 `preferred_username`/`email`/`mobile`/`sub`（忽略大小写） |
+| `KV_BINDING` | `EXAM_KV` | KV 绑定的运行时变量名 |
 
 ## 接口
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/auth/login?returnTo=` | 跳转 OneID 授权 |
-| GET | `/api/auth/callback` | 授权回调，换取用户信息并建会话 |
-| GET | `/api/auth/logout` | 清除会话；OneID 受理回跳时跳转 `<issuer>/fclogout`（带 `client_id`、`post_logout_redirect_uri`、`id_token_hint`），否则直接回首页 |
-| GET | `/api/auth/me` | 当前登录态、是否管理员、考试规则 |
-| GET | `/api/meta` | 站点信息（题库总量、规则、登录态） |
+| GET | `/api/site` | 站点品牌配置、排名开关、截止状态（不依赖 KV） |
+| GET | `/api/meta` | 站点信息、题库总量、考试规则、登录态、剩余次数 |
 | GET | `/api/exam/rules` | 考试规则 |
 | POST | `/api/exam/start` | 抽题开考，返回题目（不含答案）与起止时间 |
 | GET | `/api/exam/questions` | 取整卷或单题（`?index=N`） |
-| POST | `/api/exam/submit` | 交卷判分并落库 |
-| GET | `/api/ranking` | 成绩排名（公开） |
+| POST | `/api/exam/submit` | 交卷判分；`answers` 为 `{ 题号: 选项字母 }` |
+| GET | `/api/ranking` | 成绩排名（`EXAM_SHOW_RANKING=false` 时 403） |
+| GET | `/api/auth/login?returnTo=` | 跳转 OneID 授权 |
+| GET | `/api/auth/callback` | 授权回调，换取用户信息并建会话 |
+| GET | `/api/auth/logout` | 清除会话；OneID 受理回跳时跳 `fclogout`，否则直接回首页 |
+| GET | `/api/auth/me` | 当前登录态、是否管理员、考试规则、剩余次数 |
 | GET | `/api/admin/stats` | 统计指标（仅管理员） |
 | GET | `/api/admin/records` | 答题记录列表（仅管理员） |
 | GET | `/api/admin/record?id=` | 单条记录详情（仅管理员） |
+
+错误码约定：`401` 未登录、`403` 无权限/已截止/次数用尽/排名关闭、`409` 无进行中的考试或已超时、
+`503 KV_BINDING_MISSING` 缺 KV 绑定。
 
 ## 数据模型（KV）
 
@@ -188,13 +266,16 @@ EdgeOne KV 的 key 只允许**数字、字母、下划线**（≤ 512B），所�
 
 > `kv.list()` 的 `cursor` 是**严格字符串**：首次查询不能带这个字段，带 `undefined` 会直接抛
 > `cursor type invalid. expect: 'string' get: 'undefined'`。分页统一走 `store.js` 的 `listAllKeys()`，
-> 它只在拿到非空 cursor 时才续翻。空数据池同样会走一次前缀扫描，所以这个坑和「有没有人答题」无关。
+> 它只在拿到非空 cursor 时才续翻。
 
 ## 本地开发与测试
 
 ```bash
-# 集成测试 + 认证单元测试（无需网络与 KV）
+# 题库解析 / 抽题 / 判分单元测试
+node test/bank.mjs
+# 接口集成测试（无需网络与 KV）
 node test/run.mjs
+# 认证与加密单元测试
 node test/auth.mjs
 
 # 本地开发服务器（自带 mock OIDC，无需真实 OneID）
@@ -202,17 +283,24 @@ node test/dev-server.mjs
 # 打开 http://127.0.0.1:8787
 ```
 
-本地开发服务器把 mock KV 挂在全局 `EXAM_KV` 上，和 EdgeOne 线上行为一致；
-`mock-kv.js` 还会校验 key 字符合法性，key 写错在本地就会报错。
+本地也能试配置，例如：
+
+```bash
+SITE_NAME="内部认证考试" BRAND_COLOR="#e11d48" EXAM_MAX_ATTEMPTS=2 \
+EXAM_QUESTION_COUNT=5 EXAM_POINTS_PER_QUESTION=20 node test/dev-server.mjs
+```
 
 本地登录：访问 `/api/auth/login`，mock 提供方默认签发「李四」；
 把跳转到的 `/mock-oidc/authorize` 地址末尾加上 `&user=code_admin` 即以管理员身份登录。
 
 ## 安全说明
 
-- 正确答案仅存于服务端，`/api/exam/start` 下发的题目不含 `answer` 字段，判分在提交时以题库为准。
+- 正确答案仅存于服务端；`/api/exam/start` 下发的题目不含 `answer`，判分在提交时以题库为准；
+  `EXAM_SHOW_ANSWER=false` 时连交卷响应里的答案与对错也不返回。
 - 试卷落 KV 并带 TTL；即便 KV 跨节点暂未命中，交卷时也用服务端题库按题号判分，不接受前端传入的正确答案。
-- 会话 Cookie 为 HttpOnly + SameSite=Lax，载荷经 AES-GCM 加密并用 HMAC-SHA256 签名，密钥即 `SESSION_SECRET`。
+- 单选题只接受单个选项字母（`A`~`H`）且必须在选项内，多选、乱填一律按未作答处理。
+- 超时交卷会被拒绝（`409 EXAM_TIMEOUT`）并清理进行中的试卷，只留有 90 秒传输余量。
+- 截止时间与次数限制在服务端强制校验，前端隐藏入口只是体验优化。
+- 会话 Cookie 为 HttpOnly + SameSite=Lax，载荷经 AES-GCM 加密并用 HMAC-SHA256 签名。
 - OIDC 使用授权码 + PKCE（S256）与 state 校验，防重放与 CSRF。
 - 管理后台在服务端做白名单校验，前端仅控制入口显示。
-

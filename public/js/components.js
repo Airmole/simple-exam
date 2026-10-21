@@ -1,9 +1,12 @@
 // 共用 UI 片段
 import { h } from './util.js';
+import { cachedSite, rankingEnabled } from './site.js';
 
 export function topbar(meta = {}) {
+  const site = cachedSite() || {};
   const user = meta.user;
-  const actions = [h('a', { href: '#/ranking', text: '成绩排名' })];
+  const actions = [];
+  if (rankingEnabled()) actions.push(h('a', { href: '#/ranking', text: '成绩排名' }));
   if (user && meta.isAdmin) actions.push(h('a', { href: '#/admin', text: '管理后台' }));
   if (user) {
     actions.push(h('span', { class: 'muted' }, [user.name]));
@@ -13,27 +16,29 @@ export function topbar(meta = {}) {
   }
   return h('div', { class: 'topbar' }, [
     h('a', { class: 'brand', href: '#/' }, [
-      h('span', { class: 'logo', text: 'DJI' }),
-      h('span', { text: '机场 4 认证考试' }),
+      h('span', { class: 'logo', text: site.logo || 'Q' }),
+      h('span', { text: site.siteName || '考试系统' }),
     ]),
     h('div', { class: 'topbar-actions' }, actions),
   ]);
 }
 
 export function rulesCard(rules) {
-  return h('div', { class: 'rules' }, [
-    rule('题目数量', rules.questionCount, '题'),
-    rule('每题分值', rules.pointsPerQuestion, '分'),
-    rule('试卷满分', rules.totalScore, '分'),
-    rule('合格分数', rules.passScore, '分'),
-    rule('考试时长', rules.durationMinutes, '分钟'),
-  ]);
+  const items = [
+    ['题目数量', rules.questionCount, '题'],
+    ['每题分值', rules.pointsPerQuestion, '分'],
+    ['试卷满分', rules.totalScore, '分'],
+    ['合格分数', rules.passScore, '分'],
+    ['考试时长', rules.durationMinutes, '分钟'],
+  ];
+  if (rules.maxAttemptsDesc) items.push(['考试次数', rules.maxAttemptsDesc, '']);
+  return h('div', { class: 'rules' }, items.map(([k, v, unit]) => rule(k, v, unit)));
 }
 
 function rule(k, v, unit) {
   return h('div', { class: 'rule' }, [
     h('div', { class: 'k', text: k }),
-    h('div', { class: 'v' }, [String(v), h('small', { text: ` ${unit}` })]),
+    h('div', { class: 'v' }, [String(v), unit ? h('small', { text: ` ${unit}` }) : null]),
   ]);
 }
 

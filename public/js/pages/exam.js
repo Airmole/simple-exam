@@ -1,10 +1,10 @@
-// 答题页：实时展示用时/剩余时长/已答数/剩余数/原题号，支持答题卡跳转与自动交卷
+// 答题页：实时展示用时/剩余时长/已答数/剩余数/题号，支持答题卡跳转与自动交卷
 import { api } from '../api.js';
 import { h, fmtCountdown, fmtTime, toast, draftStore, notice } from '../util.js';
 import { topbar, errorCard } from '../components.js';
-import { closedNotice } from '../config.js';
+import { closedNotice } from '../site.js';
 
-const OPTION_KEYS = ['A', 'B', 'C', 'D', 'E', 'F'];
+const OPTION_KEYS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
 
 export async function renderExam({ navigate, setLeaveGuard }) {
   let meta;
@@ -26,7 +26,6 @@ export async function renderExam({ navigate, setLeaveGuard }) {
           h('h2', { text: '考试已截止' }),
           notice('warn', closed),
           h('div', { class: 'btn-row mt' }, [
-            h('button', { class: 'btn btn-primary', text: '查看成绩排名', onClick: () => navigate('#/ranking') }),
             h('button', { class: 'btn', text: '返回首页', onClick: () => navigate('#/') }),
           ]),
         ]),
@@ -42,7 +41,7 @@ export async function renderExam({ navigate, setLeaveGuard }) {
         h('div', { class: 'card' }, [
           h('h2', { text: '请先登录' }),
           notice('warn', '考试需要登录后参加。'),
-          h('div', { class: 'btn-row mt' }, [h('a', { class: 'btn btn-primary', href: '/api/auth/login', text: '使用 OneID 登录' })]),
+          h('div', { class: 'btn-row mt' }, [h('a', { class: 'btn btn-primary', href: '/api/auth/login', text: '去登录' })]),
         ]),
       ]),
       title: '请先登录',
@@ -149,8 +148,7 @@ export async function renderExam({ navigate, setLeaveGuard }) {
     questionCard.appendChild(h('div', { class: 'question-head' }, [
       h('span', { class: 'question-no' }, [
         `第 ${state.index + 1} / ${total} 题`,
-        ' · ',
-        h('b', { text: `原题号 #${originalId}` }),
+        h('b', { text: ` · 题库 #${originalId}` }),
       ]),
       h('span', { class: 'muted', style: 'font-size:13px', text: `${paper.rules.pointsPerQuestion} 分` }),
     ]));
@@ -196,7 +194,7 @@ export async function renderExam({ navigate, setLeaveGuard }) {
       answerGrid.appendChild(h('button', {
         class: `${done ? 'done ' : ''}${i === state.index ? 'current' : ''}`,
         text: String(i + 1),
-        title: `原题号 #${q.originalId ?? q.id}`,
+        title: `题库 #${q.originalId ?? q.id}`,
         onClick: () => { state.index = i; renderQuestion(); renderSheet(); renderStatus(); },
       }));
     });
@@ -230,12 +228,13 @@ export async function renderExam({ navigate, setLeaveGuard }) {
     try {
       const res = await api.submitExam(payload);
       draftStore.clear();
-      sessionStorage.setItem(`exam_result_${res.recordId}`, JSON.stringify({
+      const resultKey = res.recordId ? `exam_result_${res.recordId}` : 'exam_result_latest';
+      sessionStorage.setItem(resultKey, JSON.stringify({
         ...res,
         questions: paper.questions,
         rules: paper.rules,
       }));
-      navigate(`#/result/${encodeURIComponent(res.recordId)}`);
+      navigate(`#/result/${encodeURIComponent(res.recordId || 'latest')}`);
     } catch (e) {
       state.submitted = false;
       questionCard.innerHTML = '';
@@ -286,7 +285,7 @@ export async function renderExam({ navigate, setLeaveGuard }) {
 
   return {
     element,
-    title: '正在考试 · 大疆机场 4 认证考试',
+    title: '正在考试',
     destroy: () => { state.destroyed = true; stopTimers(); },
   };
 }

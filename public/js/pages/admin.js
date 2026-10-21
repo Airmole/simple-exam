@@ -16,7 +16,7 @@ export async function renderAdmin({ navigate }) {
       element: wrap([topbar(meta), h('div', { class: 'card' }, [
         h('h2', { text: '需要登录' }),
         notice('warn', '管理后台仅限指定用户访问。'),
-        h('div', { class: 'btn-row mt' }, [h('a', { class: 'btn btn-primary', href: '/api/auth/login', text: '使用 OneID 登录' })]),
+        h('div', { class: 'btn-row mt' }, [h('a', { class: 'btn btn-primary', href: '/api/auth/login', text: '去登录' })]),
       ])]),
       title: '请先登录',
     };
@@ -92,7 +92,7 @@ export async function renderAdmin({ navigate }) {
     ]),
   ];
 
-  return { element: wrap(children), title: '管理后台 · 大疆机场 4 认证考试' };
+  return { element: wrap(children), title: '管理后台' };
 }
 
 function statCard(k, v, unit) {
@@ -106,7 +106,7 @@ function noPermission(meta) {
   return {
     element: wrap([topbar(meta), h('div', { class: 'card' }, [
       h('h2', { text: '无权访问' }),
-      notice('bad', '你没有管理后台的访问权限。如需开通，请联系管理员将你的 OneID 账号加入白名单。'),
+      notice('bad', '你没有管理后台的访问权限。如需开通，请联系管理员把你的登录账号加入 ADMIN_USERS 白名单。'),
       h('div', { class: 'btn-row mt' }, [
         h('button', { class: 'btn btn-primary', text: '返回首页', onClick: () => { location.hash = '#/'; } }),
         h('button', { class: 'btn', text: '查看成绩排名', onClick: () => { location.hash = '#/ranking'; } }),
@@ -157,7 +157,7 @@ async function showDetail(row) {
         `${i + 1}. ${d.question}`,
         h('span', { class: `tag ${d.isCorrect ? 'tag-ok' : 'tag-bad'}`, text: d.isCorrect ? '对' : '错' }),
       ]),
-      h('div', { class: 'detail-line', text: `原题号 #${d.id}` }),
+      h('div', { class: 'detail-line', text: `题库 #${d.id}` }),
       h('div', { class: 'detail-line', text: `正确答案：${d.correctAnswer ?? '—'}${d.correctAnswer && d.options?.[d.correctAnswer] ? `（${d.options[d.correctAnswer]}）` : ''}` }),
       h('div', { class: 'detail-line', text: `用户作答：${d.submittedAnswer ?? '未作答'}${d.submittedAnswer && d.options?.[d.submittedAnswer] ? `（${d.options[d.submittedAnswer]}）` : ''}` }),
     ]))));

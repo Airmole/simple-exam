@@ -4,9 +4,7 @@ import { fail, noContent, ok, readJSON, withCookies } from './http.js';
 import { cookies, createFlow, createSession, exchangeCode, fetchUserInfo, isAdmin, normalizeUser, readFlow, readSession, decodeIdTokenClaims, buildLogoutUrl, logoutAccepted } from './oidc.js';
 import { drawQuestions, getBankSize } from './questions.js';
 import { gradeSubmission } from './scoring.js';
-import { buildRanking, getRecord, getStats, listRecords, paperKey, saveRecord } from './store.js';
-
-const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' };
+import { buildRanking, countAttempts, getRecord, getStats, listRecords, maskDetails, paperKey, saveRecord } from './store.js';
 
 function segments(request) {
   const { pathname } = new URL(request.url);
@@ -29,6 +27,12 @@ export async function handleApi(context) {
 
   if (method === 'OPTIONS') return noContent(204, { allow: 'GET,POST,PUT,DELETE,OPTIONS' });
 
+  const parts = segments(request);
+  const path = parts.join('/');
+
+  // 站点配置不依赖 KV，KV 没绑也能先看到配置是否正确
+  if (path === 'site' && method === 'GET') return ok(siteInfo(config));
+
   let kv;
   try {
     kv = getKV(context.env, config);
@@ -37,37 +41,37 @@ export async function handleApi(context) {
     return fail(e.message, 503, { code: 'KV_BINDING_MISSING', binding: config.kvBinding });
   }
 
-  const parts = segments(request);
-  const path = parts.join('/');
-
   try {
     // ---- 认证 ----
     if (path === 'auth/login') return await handleLogin(request, config);
     if (path === 'auth/callback') return await handleCallback(request, config);
     if (path === 'auth/logout') return await handleLogout(request, config);
-    if (path === 'auth/me') return await handleMe(request, config);
+    if (path === 'auth/me') return await handleMe(request, config, kv);
 
     // ---- 考试规则 ----
-    if (path === 'exam/rules') return ok({ rules: publicRules(config) });
+    if (path === 'exam/rules') return ok({ rules: await publicRules(config) });
 
     const session = await readSession(request, config.sessionSecret);
     const admin = { session, isAdmin: isAdmin(session, config) };
 
     // ---- 考试 ----
-    if (path === 'exam/start' && method === 'POST') return await handleExamStart(request, config, kv, session);
+    if (path === 'exam/start' && method === 'POST') return await handleExamStart(config, kv, session);
     if (path === 'exam/questions' && method === 'GET') return await handleExamQuestions(config, kv, session, new URL(request.url).searchParams);
     if (path === 'exam/submit' && method === 'POST') return await handleExamSubmit(request, config, kv, session);
 
     // ---- 排名 ----
-    if (path === 'ranking' && method === 'GET') return ok({ ranking: await buildRanking(kv) });
+    if (path === 'ranking' && method === 'GET') {
+      if (!config.showRanking) return fail('本场考试未开放成绩排名', 403, { code: 'RANKING_DISABLED' });
+      return ok({ ranking: await buildRanking(kv) });
+    }
 
     // ---- 管理后台 ----
     if (path === 'admin/stats' && method === 'GET') return await handleAdminStats(kv, admin);
     if (path === 'admin/records' && method === 'GET') return await handleAdminRecords(kv, admin);
-    if (path === 'admin/record' && method === 'GET') return await handleAdminRecord(kv, admin, new URL(request.url).searchParams);
+    if (path === 'admin/record' && method === 'GET') return await handleAdminRecord(config, kv, admin, new URL(request.url).searchParams);
 
     // ---- 站点元信息 ----
-    if (path === 'meta' && method === 'GET') return ok(metaInfo(config, session, admin));
+    if (path === 'meta' && method === 'GET') return ok(await metaInfo(config, session, admin, kv));
 
     return fail('接口不存在', 404);
   } catch (e) {
@@ -75,24 +79,47 @@ export async function handleApi(context) {
   }
 }
 
-function publicRules(config) {
+async function publicRules(config) {
+  const bankSize = await getBankSize();
   return {
-    questionCount: config.questionCount,
+    // 题库不足时按实际题量出卷，总分随之变化，避免出现「抽 50 题」但题库只有 20 题
+    questionCount: Math.min(config.questionCount, bankSize),
     pointsPerQuestion: config.pointsPerQuestion,
-    totalScore: config.totalScore,
+    totalScore: Math.min(config.questionCount, bankSize) * config.pointsPerQuestion,
     passScore: config.passScore,
     durationMinutes: config.durationMinutes,
     durationSeconds: config.durationMinutes * 60,
+    maxAttemptsDesc: config.maxAttempts > 0 ? `每人最多 ${config.maxAttempts} 次` : '不限次数',
+    showRanking: config.showRanking,
+    showAnswer: config.showAnswer,
   };
 }
 
-function metaInfo(config, session, admin) {
+/** 站点品牌配置，前端据此渲染标题、Logo 与主题色 */
+function siteInfo(config) {
+  return {
+    siteName: config.siteName,
+    logo: config.siteLogo,
+    brandColor: config.brandColor,
+    showRanking: config.showRanking,
+    deadline: config.deadline,
+    deadlineAt: config.deadlineAt,
+    closed: config.deadlineAt != null && Date.now() >= config.deadlineAt,
+  };
+}
+
+async function metaInfo(config, session, admin, kv) {
+  const attempts = session && config.maxAttempts > 0 ? await countAttempts(kv, session.sub) : 0;
   return {
     siteUrl: config.siteUrl,
-    bankSize: getBankSize(),
-    rules: publicRules(config),
-    user: session ? { name: session.name, username: session.username } : null,
+    site: siteInfo(config),
+    bankSize: await getBankSize(),
+    rules: await publicRules(config),
+    user: session ? { name: session.name, username: session.username, sub: session.sub } : null,
     isAdmin: admin.isAdmin,
+    // 已考次数与剩余次数，用于前端在开考前就拦住超次数的用户
+    attempts,
+    attemptsLeft: config.maxAttempts > 0 ? Math.max(0, config.maxAttempts - attempts) : null,
   };
 }
 
@@ -160,7 +187,6 @@ function sameSite(request, target) {
 // 不用 POST 表单：fclogout 只收 GET，POST 回 405。
 async function handleLogout(request, config) {
   const session = await readSession(request, config.sessionSecret);
-  const url = new URL(request.url);
   const postLogout = config.logoutRedirectUri || redirectTo(request, '/', config);
   const idTokenHint = (session && session.idToken) || '';
   const logoutUrl = await buildLogoutUrl(config, { idTokenHint, postLogoutRedirect: postLogout });
@@ -169,32 +195,49 @@ async function handleLogout(request, config) {
   return withCookies(Response.redirect(accepted ? logoutUrl : backHome, 302), cookies.clearSession(request));
 }
 
-async function handleMe(request, config) {
+async function handleMe(request, config, kv) {
   const session = await readSession(request, config.sessionSecret);
-  const admin = isAdmin(session, config);
+  const attempts = session && config.maxAttempts > 0 ? await countAttempts(kv, session.sub) : 0;
   return ok({
     authenticated: !!session,
     user: session ? { name: session.name, username: session.username, sub: session.sub } : null,
-    isAdmin: admin,
-    rules: publicRules(config),
+    isAdmin: isAdmin(session, config),
+    rules: await publicRules(config),
+    site: siteInfo(config),
+    attempts,
+    attemptsLeft: config.maxAttempts > 0 ? Math.max(0, config.maxAttempts - attempts) : null,
   });
 }
 
 /* ---------------- 考试 ---------------- */
 
-async function handleExamStart(request, config, kv, session) {
-  if (!session) return fail('请先登录', 401);
+// 截止时间与次数限制都在服务端再挡一次，前端隐藏入口只是体验
+function examBlocked(config) {
+  if (config.deadlineAt != null && Date.now() >= config.deadlineAt) {
+    return fail(`本次考试已于 ${config.deadline} 截止`, 403, { code: 'EXAM_CLOSED', deadline: config.deadline });
+  }
+  return null;
+}
 
-  const body = await readJSON(request);
-  const questions = drawQuestions(config.questionCount);
+async function handleExamStart(config, kv, session) {
+  if (!session) return fail('请先登录', 401);
+  const blocked = examBlocked(config);
+  if (blocked) return blocked;
+
+  if (config.maxAttempts > 0 && await countAttempts(kv, session.sub) >= config.maxAttempts) {
+    return fail(`每人最多参加 ${config.maxAttempts} 次考试，你已达到上限`, 403, { code: 'ATTEMPTS_EXCEEDED' });
+  }
+
+  const questions = await drawQuestions(config.questionCount);
   const startedAt = Date.now();
+  const rules = await publicRules(config);
   const paper = {
     sub: session.sub,
     name: session.name,
     questions,
     startedAt,
     expiresAt: startedAt + config.durationMinutes * 60 * 1000,
-    rules: publicRules(config),
+    rules,
   };
   await kv.put(paperKey(session.sub), JSON.stringify(paper), { expirationTtl: config.durationMinutes * 60 + 3600 });
   return ok({
@@ -202,7 +245,7 @@ async function handleExamStart(request, config, kv, session) {
     startedAt: paper.startedAt,
     expiresAt: paper.expiresAt,
     durationSeconds: config.durationMinutes * 60,
-    rules: paper.rules,
+    rules,
     questions: questions.map((q) => ({ ...q, originalId: q.id })),
     total: questions.length,
   });
@@ -251,51 +294,70 @@ async function handleExamSubmit(request, config, kv, session) {
 
   if (!questions) {
     // 试卷丢失（KV 过期/跨节点延迟）时，用客户端回传的题号还原，判分仍以服务端题库为准
-    const ids = Array.isArray(body.questionIds) ? body.questionIds : [];
+    const ids = Array.isArray(body.questionIds) ? body.questionIds.map(Number).filter(Number.isInteger) : [];
     questions = ids.map((id) => ({ id }));
     if (!questions.length) return fail('未找到进行中的考试，请重新开始', 409);
   }
 
+  // 超时交卷只收「自动交卷」这一次：前端到点会自己提交，这里给 90 秒的传输余量
+  const deadline = (raw && raw.expiresAt ? raw.expiresAt : startedAt + config.durationMinutes * 60 * 1000) + 90 * 1000;
+  if (now > deadline) {
+    await kv.delete(paperKey(session.sub));
+    return fail('考试已超时，本次作答未记录，请重新开始', 409, { code: 'EXAM_TIMEOUT' });
+  }
+
   const finishedAt = now;
-  const graded = gradeSubmission(questions, answers, config.pointsPerQuestion);
+  const graded = await gradeSubmission(questions, answers, config.pointsPerQuestion);
   const durationMs = Math.max(0, finishedAt - startedAt);
   const passed = graded.score >= config.passScore;
 
-  const record = await saveRecord(kv, {
-    sub: session.sub,
-    name: session.name,
-    username: session.username,
+  // 逐题解析只在交卷这一刻可靠（记录可能不落库），所以是否回答案由 EXAM_SHOW_ANSWER 决定
+  const details = graded.details.map((d) => ({
+    id: d.id,
+    question: d.question,
+    options: d.options,
+    correctAnswer: config.showAnswer ? d.correctAnswer : null,
+    submittedAnswer: d.submittedAnswer,
+    isCorrect: config.showAnswer ? d.isCorrect : null,
+  }));
+
+  const result = {
+    score: graded.score,
+    correctCount: graded.correctCount,
+    total: graded.details.length,
+    passScore: config.passScore,
+    totalScore: graded.details.length * config.pointsPerQuestion,
+    passed,
     startedAt,
     finishedAt,
     durationMs,
-    score: graded.score,
-    correctCount: graded.correctCount,
-    total: questions.length,
-    passScore: config.passScore,
-    passed,
-    details: graded.details,
-  });
+    showAnswer: config.showAnswer,
+    showRanking: config.showRanking,
+    details,
+    recordId: null,
+  };
+
+  if (config.keepRecords) {
+    const record = await saveRecord(kv, {
+      sub: session.sub,
+      name: session.name,
+      username: session.username,
+      startedAt,
+      finishedAt,
+      durationMs,
+      score: graded.score,
+      correctCount: graded.correctCount,
+      total: graded.details.length,
+      passScore: config.passScore,
+      passed,
+      details: graded.details,
+    });
+    result.recordId = record.id;
+  }
 
   // 交卷后清掉进行中的试卷，防止重复提交
   await kv.delete(paperKey(session.sub));
-
-  return ok({
-    recordId: record.id,
-    score: graded.score,
-    correctCount: graded.correctCount,
-    total: questions.length,
-    passScore: config.passScore,
-    passed,
-    startedAt,
-    finishedAt,
-    durationMs,
-    details: graded.details.map((d) => ({
-      id: d.id,
-      correctAnswer: d.correctAnswer,
-      submittedAnswer: d.submittedAnswer,
-      isCorrect: d.isCorrect,
-    })),
-  });
+  return ok(result);
 }
 
 /* ---------------- 管理后台 ---------------- */
@@ -346,12 +408,12 @@ async function handleAdminRecords(kv, admin) {
   });
 }
 
-async function handleAdminRecord(kv, admin, params) {
+async function handleAdminRecord(config, kv, admin, params) {
   const denied = requireAdmin(admin);
   if (denied) return denied;
   const id = params.get('id');
   if (!id) return fail('缺少记录 id', 400);
   const record = await getRecord(kv, id);
   if (!record) return fail('记录不存在', 404);
-  return ok({ record, isAdmin: true });
+  return ok({ record: maskDetails(record, config.showAnswer), isAdmin: true });
 }
